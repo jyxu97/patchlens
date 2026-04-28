@@ -2,19 +2,19 @@ package com.patchlens.controller;
 
 import com.patchlens.dto.AnalyzePullRequestRequest;
 import com.patchlens.exception.GitHubApiException;
-import com.patchlens.model.ChangedFile;
-import com.patchlens.model.PullRequestMetadata;
-import com.patchlens.model.ReviewResult;
-import com.patchlens.model.RiskScore;
+import com.patchlens.model.*;
+import com.patchlens.repository.ReviewSessionRepository;
 import com.patchlens.service.*;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import tools.jackson.databind.ObjectMapper;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/reviews")
@@ -27,6 +27,8 @@ public class ReviewController {
     private final RiskScoringService riskScoringService;
     private final OpenAIService openAIService;
     private final CacheService cacheService;
+    private final ReviewSessionRepository sessionRepository;
+    private final ObjectMapper objectMapper;
 
     public ReviewController(SamplePrLoader samplePrLoader,
                             GitHubPrUrlParser urlParser,
@@ -34,7 +36,9 @@ public class ReviewController {
                             DiffParserService diffParserService,
                             RiskScoringService riskScoringService,
                             OpenAIService openAIService,
-                            CacheService cacheService) {
+                            CacheService cacheService,
+                            ReviewSessionRepository sessionRepository,
+                            ObjectMapper objectMapper) {
         this.samplePrLoader = samplePrLoader;
         this.urlParser = urlParser;
         this.gitHubService = gitHubService;
@@ -42,6 +46,8 @@ public class ReviewController {
         this.riskScoringService = riskScoringService;
         this.openAIService = openAIService;
         this.cacheService = cacheService;
+        this.sessionRepository = sessionRepository;
+        this.objectMapper = objectMapper;
     }
 
     /**
@@ -96,7 +102,15 @@ public class ReviewController {
 
         cacheService.put(cacheKey, reviewResult, cacheService.ttlForGitHubPr());
 
+        // Persist the session to PostgreSQL
+        ReviewSession session = new ReviewSession(
+                pr.owner(), pr.repo(), pr.pullNumber(), metadata.url(),
+                diffHash, cacheKey, "github", toJson(reviewResult)
+        );
+        sessionRepository.save(session);
+
         return ResponseEntity.ok(Map.of(
+                "reviewSessionId", session.getId(),
                 "repository", pr.owner() + "/" + pr.repo(),
                 "pullRequestNumber", pr.pullNumber(),
                 "title", metadata.title(),
@@ -150,7 +164,16 @@ public class ReviewController {
 
         cacheService.put(cacheKey, reviewResult, cacheService.ttlForSamplePr());
 
+        // Persist the session to PostgreSQL
+        ReviewSession session = new ReviewSession(
+                sample.metadata().owner(), sample.metadata().repo(),
+                sample.metadata().pullNumber(), sample.metadata().url(),
+                diffHash, cacheKey, "sample", toJson(reviewResult)
+        );
+        sessionRepository.save(session);
+
         return ResponseEntity.ok(Map.of(
+                "reviewSessionId", session.getId(),
                 "sampleId", request.sampleId(),
                 "repository", sample.metadata().owner() + "/" + sample.metadata().repo(),
                 "pullRequestNumber", sample.metadata().pullNumber(),
@@ -161,6 +184,46 @@ public class ReviewController {
                 "riskScores", riskScores,
                 "result", reviewResult
         ));
+    }
+
+    /**
+     * Fetches a previously saved review by its session ID.
+     * GET /api/reviews/{reviewSessionId}
+     */
+    @GetMapping("/{reviewSessionId}")
+    public ResponseEntity<?> getReview(@PathVariable UUID reviewSessionId) {
+        return sessionRepository.findById(reviewSessionId)
+                .map(session -> {
+                    ReviewResult result = fromJson(session.getResultJson());
+                    return ResponseEntity.ok(Map.of(
+                            "reviewSessionId", session.getId(),
+                            "repository", session.getRepositoryOwner() + "/" + session.getRepositoryName(),
+                            "pullRequestNumber", session.getPullRequestNumber(),
+                            "diffHash", session.getDiffHash(),
+                            "mode", session.getMode(),
+                            "createdAt", session.getCreatedAt(),
+                            "result", result
+                    ));
+                })
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    // --- helpers ---
+
+    private String toJson(ReviewResult result) {
+        try {
+            return objectMapper.writeValueAsString(result);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize ReviewResult", e);
+        }
+    }
+
+    private ReviewResult fromJson(String json) {
+        try {
+            return objectMapper.readValue(json, ReviewResult.class);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to deserialize ReviewResult", e);
+        }
     }
 
     // Request body for analyze-sample endpoint only; kept here to avoid a separate file
