@@ -4,9 +4,11 @@ import com.patchlens.dto.AnalyzePullRequestRequest;
 import com.patchlens.exception.GitHubApiException;
 import com.patchlens.model.ChangedFile;
 import com.patchlens.model.PullRequestMetadata;
+import com.patchlens.model.RiskScore;
 import com.patchlens.service.DiffParserService;
 import com.patchlens.service.GitHubPrUrlParser;
 import com.patchlens.service.GitHubService;
+import com.patchlens.service.RiskScoringService;
 import com.patchlens.service.SamplePrLoader;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -24,15 +26,18 @@ public class ReviewController {
     private final GitHubPrUrlParser urlParser;
     private final GitHubService gitHubService;
     private final DiffParserService diffParserService;
+    private final RiskScoringService riskScoringService;
 
     public ReviewController(SamplePrLoader samplePrLoader,
                             GitHubPrUrlParser urlParser,
                             GitHubService gitHubService,
-                            DiffParserService diffParserService) {
+                            DiffParserService diffParserService,
+                            RiskScoringService riskScoringService) {
         this.samplePrLoader = samplePrLoader;
         this.urlParser = urlParser;
         this.gitHubService = gitHubService;
         this.diffParserService = diffParserService;
+        this.riskScoringService = riskScoringService;
     }
 
     /**
@@ -70,15 +75,19 @@ public class ReviewController {
         String normalizedDiff = diffParserService.normalize(metadata, files);
         String diffHash = diffParserService.hash(normalizedDiff);
 
-        // Return raw data for now.
-        // Risk scoring and AI generation will be wired in later milestones.
+        // Step 4: run rule-based risk scoring
+        List<RiskScore> riskScores = riskScoringService.score(files);
+        RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
+
+        // Return data for now. AI generation will be wired in the next milestone.
         return ResponseEntity.ok(Map.of(
                 "repository", pr.owner() + "/" + pr.repo(),
                 "pullRequestNumber", pr.pullNumber(),
                 "title", metadata.title(),
                 "diffHash", diffHash,
                 "changedFiles", files.size(),
-                "files", files
+                "overallRisk", overallRisk,
+                "riskScores", riskScores
         ));
     }
 
@@ -103,8 +112,10 @@ public class ReviewController {
         String normalizedDiff = diffParserService.normalize(sample.metadata(), sample.files());
         String diffHash = diffParserService.hash(normalizedDiff);
 
-        // Return raw sample data for now.
-        // Risk scoring and AI generation will be wired in later milestones.
+        List<RiskScore> riskScores = riskScoringService.score(sample.files());
+        RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
+
+        // Return data for now. AI generation will be wired in the next milestone.
         return ResponseEntity.ok(Map.of(
                 "sampleId", request.sampleId(),
                 "repository", sample.metadata().owner() + "/" + sample.metadata().repo(),
@@ -112,7 +123,8 @@ public class ReviewController {
                 "title", sample.metadata().title(),
                 "diffHash", diffHash,
                 "changedFiles", sample.files().size(),
-                "files", sample.files()
+                "overallRisk", overallRisk,
+                "riskScores", riskScores
         ));
     }
 
