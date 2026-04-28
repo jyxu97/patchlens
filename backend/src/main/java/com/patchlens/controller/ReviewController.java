@@ -4,10 +4,12 @@ import com.patchlens.dto.AnalyzePullRequestRequest;
 import com.patchlens.exception.GitHubApiException;
 import com.patchlens.model.ChangedFile;
 import com.patchlens.model.PullRequestMetadata;
+import com.patchlens.model.ReviewResult;
 import com.patchlens.model.RiskScore;
 import com.patchlens.service.DiffParserService;
 import com.patchlens.service.GitHubPrUrlParser;
 import com.patchlens.service.GitHubService;
+import com.patchlens.service.OpenAIService;
 import com.patchlens.service.RiskScoringService;
 import com.patchlens.service.SamplePrLoader;
 import jakarta.validation.Valid;
@@ -27,17 +29,20 @@ public class ReviewController {
     private final GitHubService gitHubService;
     private final DiffParserService diffParserService;
     private final RiskScoringService riskScoringService;
+    private final OpenAIService openAIService;
 
     public ReviewController(SamplePrLoader samplePrLoader,
                             GitHubPrUrlParser urlParser,
                             GitHubService gitHubService,
                             DiffParserService diffParserService,
-                            RiskScoringService riskScoringService) {
+                            RiskScoringService riskScoringService,
+                            OpenAIService openAIService) {
         this.samplePrLoader = samplePrLoader;
         this.urlParser = urlParser;
         this.gitHubService = gitHubService;
         this.diffParserService = diffParserService;
         this.riskScoringService = riskScoringService;
+        this.openAIService = openAIService;
     }
 
     /**
@@ -48,7 +53,6 @@ public class ReviewController {
     @PostMapping("/analyze")
     public ResponseEntity<?> analyze(@Valid @RequestBody AnalyzePullRequestRequest request) {
 
-        // Step 1: parse the URL into owner / repo / pullNumber
         var parsed = urlParser.parse(request.pullRequestUrl());
         if (parsed.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of(
@@ -58,7 +62,6 @@ public class ReviewController {
         }
         var pr = parsed.get();
 
-        // Step 2: fetch PR metadata and changed files from GitHub
         PullRequestMetadata metadata;
         List<ChangedFile> files;
         try {
@@ -71,23 +74,20 @@ public class ReviewController {
             ));
         }
 
-        // Step 3: normalize the diff and compute hash
         String normalizedDiff = diffParserService.normalize(metadata, files);
         String diffHash = diffParserService.hash(normalizedDiff);
-
-        // Step 4: run rule-based risk scoring
         List<RiskScore> riskScores = riskScoringService.score(files);
         RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
+        ReviewResult reviewResult = openAIService.generateReview(metadata, files, riskScores);
 
-        // Return data for now. AI generation will be wired in the next milestone.
         return ResponseEntity.ok(Map.of(
                 "repository", pr.owner() + "/" + pr.repo(),
                 "pullRequestNumber", pr.pullNumber(),
                 "title", metadata.title(),
                 "diffHash", diffHash,
-                "changedFiles", files.size(),
                 "overallRisk", overallRisk,
-                "riskScores", riskScores
+                "riskScores", riskScores,
+                "result", reviewResult
         ));
     }
 
@@ -111,20 +111,19 @@ public class ReviewController {
 
         String normalizedDiff = diffParserService.normalize(sample.metadata(), sample.files());
         String diffHash = diffParserService.hash(normalizedDiff);
-
         List<RiskScore> riskScores = riskScoringService.score(sample.files());
         RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
+        ReviewResult reviewResult = openAIService.generateReview(sample.metadata(), sample.files(), riskScores);
 
-        // Return data for now. AI generation will be wired in the next milestone.
         return ResponseEntity.ok(Map.of(
                 "sampleId", request.sampleId(),
                 "repository", sample.metadata().owner() + "/" + sample.metadata().repo(),
                 "pullRequestNumber", sample.metadata().pullNumber(),
                 "title", sample.metadata().title(),
                 "diffHash", diffHash,
-                "changedFiles", sample.files().size(),
                 "overallRisk", overallRisk,
-                "riskScores", riskScores
+                "riskScores", riskScores,
+                "result", reviewResult
         ));
     }
 
