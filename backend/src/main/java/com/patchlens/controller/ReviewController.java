@@ -1,11 +1,19 @@
 package com.patchlens.controller;
 
+import com.patchlens.dto.AnalyzePullRequestRequest;
+import com.patchlens.exception.GitHubApiException;
+import com.patchlens.model.ChangedFile;
+import com.patchlens.model.PullRequestMetadata;
+import com.patchlens.service.DiffParserService;
+import com.patchlens.service.GitHubPrUrlParser;
+import com.patchlens.service.GitHubService;
 import com.patchlens.service.SamplePrLoader;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -13,9 +21,65 @@ import java.util.Map;
 public class ReviewController {
 
     private final SamplePrLoader samplePrLoader;
+    private final GitHubPrUrlParser urlParser;
+    private final GitHubService gitHubService;
+    private final DiffParserService diffParserService;
 
-    public ReviewController(SamplePrLoader samplePrLoader) {
+    public ReviewController(SamplePrLoader samplePrLoader,
+                            GitHubPrUrlParser urlParser,
+                            GitHubService gitHubService,
+                            DiffParserService diffParserService) {
         this.samplePrLoader = samplePrLoader;
+        this.urlParser = urlParser;
+        this.gitHubService = gitHubService;
+        this.diffParserService = diffParserService;
+    }
+
+    /**
+     * Analyzes a real GitHub PR.
+     * POST /api/reviews/analyze
+     * Body: { "pullRequestUrl": "https://github.com/owner/repo/pull/123" }
+     */
+    @PostMapping("/analyze")
+    public ResponseEntity<?> analyze(@Valid @RequestBody AnalyzePullRequestRequest request) {
+
+        // Step 1: parse the URL into owner / repo / pullNumber
+        var parsed = urlParser.parse(request.pullRequestUrl());
+        if (parsed.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "INVALID_PR_URL",
+                    "message", "Please enter a valid GitHub pull request URL."
+            ));
+        }
+        var pr = parsed.get();
+
+        // Step 2: fetch PR metadata and changed files from GitHub
+        PullRequestMetadata metadata;
+        List<ChangedFile> files;
+        try {
+            metadata = gitHubService.fetchMetadata(pr.owner(), pr.repo(), pr.pullNumber());
+            files = gitHubService.fetchChangedFiles(pr.owner(), pr.repo(), pr.pullNumber());
+        } catch (GitHubApiException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", e.getErrorCode(),
+                    "message", e.getMessage()
+            ));
+        }
+
+        // Step 3: normalize the diff and compute hash
+        String normalizedDiff = diffParserService.normalize(metadata, files);
+        String diffHash = diffParserService.hash(normalizedDiff);
+
+        // Return raw data for now.
+        // Risk scoring and AI generation will be wired in later milestones.
+        return ResponseEntity.ok(Map.of(
+                "repository", pr.owner() + "/" + pr.repo(),
+                "pullRequestNumber", pr.pullNumber(),
+                "title", metadata.title(),
+                "diffHash", diffHash,
+                "changedFiles", files.size(),
+                "files", files
+        ));
     }
 
     /**
@@ -24,18 +88,20 @@ public class ReviewController {
      * Body: { "sampleId": "redis-session-cache" }
      */
     @PostMapping("/analyze-sample")
-    public ResponseEntity<?> analyzeSample(
-            @Valid @RequestBody AnalyzeSampleRequest request) {
+    public ResponseEntity<?> analyzeSample(@Valid @RequestBody AnalyzeSampleRequest request) {
 
         SamplePrLoader.SamplePr sample;
         try {
             sample = samplePrLoader.load(request.sampleId());
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(
-                    Map.of("error", "SAMPLE_NOT_FOUND",
-                           "message", "Unknown sample ID: " + request.sampleId())
-            );
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error", "SAMPLE_NOT_FOUND",
+                    "message", "Unknown sample ID: " + request.sampleId()
+            ));
         }
+
+        String normalizedDiff = diffParserService.normalize(sample.metadata(), sample.files());
+        String diffHash = diffParserService.hash(normalizedDiff);
 
         // Return raw sample data for now.
         // Risk scoring and AI generation will be wired in later milestones.
@@ -44,11 +110,12 @@ public class ReviewController {
                 "repository", sample.metadata().owner() + "/" + sample.metadata().repo(),
                 "pullRequestNumber", sample.metadata().pullNumber(),
                 "title", sample.metadata().title(),
+                "diffHash", diffHash,
                 "changedFiles", sample.files().size(),
                 "files", sample.files()
         ));
     }
 
-    // Request body for this endpoint only; kept here to avoid a separate file
+    // Request body for analyze-sample endpoint only; kept here to avoid a separate file
     record AnalyzeSampleRequest(@NotBlank String sampleId) {}
 }
