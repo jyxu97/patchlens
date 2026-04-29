@@ -43,3 +43,4 @@ build/
 *.log
 
 design-doc.md
+ARCHITECTURE.md

@@ -27,6 +27,7 @@ public class ReviewController {
     private final RiskScoringService riskScoringService;
     private final OpenAIService openAIService;
     private final CacheService cacheService;
+    private final ContextRetrievalService contextRetrievalService;
     private final ReviewSessionRepository sessionRepository;
     private final ObjectMapper objectMapper;
 
@@ -37,6 +38,7 @@ public class ReviewController {
                             RiskScoringService riskScoringService,
                             OpenAIService openAIService,
                             CacheService cacheService,
+                            ContextRetrievalService contextRetrievalService,
                             ReviewSessionRepository sessionRepository,
                             ObjectMapper objectMapper) {
         this.samplePrLoader = samplePrLoader;
@@ -46,6 +48,7 @@ public class ReviewController {
         this.riskScoringService = riskScoringService;
         this.openAIService = openAIService;
         this.cacheService = cacheService;
+        this.contextRetrievalService = contextRetrievalService;
         this.sessionRepository = sessionRepository;
         this.objectMapper = objectMapper;
     }
@@ -98,7 +101,15 @@ public class ReviewController {
         // Cache miss: run full pipeline
         List<RiskScore> riskScores = riskScoringService.score(files);
         RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
-        ReviewResult reviewResult = openAIService.generateReview(metadata, files, riskScores);
+
+        // Retrieve top-k repository context chunks from pgvector for RAG
+        List<String> contextChunks = contextRetrievalService
+                .retrieve(metadata, files, riskScores)
+                .stream()
+                .map(RepositoryContextChunk::getContent)
+                .toList();
+
+        ReviewResult reviewResult = openAIService.generateReview(metadata, files, riskScores, contextChunks);
 
         cacheService.put(cacheKey, reviewResult, cacheService.ttlForGitHubPr());
 
@@ -160,7 +171,15 @@ public class ReviewController {
         // Cache miss: run full pipeline
         List<RiskScore> riskScores = riskScoringService.score(sample.files());
         RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
-        ReviewResult reviewResult = openAIService.generateReview(sample.metadata(), sample.files(), riskScores);
+
+        // Retrieve top-k repository context chunks from pgvector for RAG
+        List<String> contextChunks = contextRetrievalService
+                .retrieve(sample.metadata(), sample.files(), riskScores)
+                .stream()
+                .map(RepositoryContextChunk::getContent)
+                .toList();
+
+        ReviewResult reviewResult = openAIService.generateReview(sample.metadata(), sample.files(), riskScores, contextChunks);
 
         cacheService.put(cacheKey, reviewResult, cacheService.ttlForSamplePr());
 

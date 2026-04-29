@@ -42,14 +42,18 @@ public class OpenAIService {
     /**
      * Generates a structured review brief.
      * In mock mode, returns a deterministic fixture without calling OpenAI.
+     *
+     * @param contextChunks retrieved repository context from pgvector (may be empty)
      */
     public ReviewResult generateReview(PullRequestMetadata metadata,
                                        List<ChangedFile> files,
-                                       List<RiskScore> riskScores) {
+                                       List<RiskScore> riskScores,
+                                       List<String> contextChunks) {
         if ("mock".equalsIgnoreCase(aiMode)) {
             return mockResult(metadata);
         }
-        return callOpenAI(metadata, files, riskScores);
+        return callOpenAI(metadata, files, riskScores, contextChunks);
+
     }
 
     // --- mock mode ---
@@ -76,8 +80,9 @@ public class OpenAIService {
 
     private ReviewResult callOpenAI(PullRequestMetadata metadata,
                                     List<ChangedFile> files,
-                                    List<RiskScore> riskScores) {
-        String userPrompt = buildPrompt(metadata, files, riskScores);
+                                    List<RiskScore> riskScores,
+                                    List<String> contextChunks) {
+        String userPrompt = buildPrompt(metadata, files, riskScores, contextChunks);
 
         // Build the request body as a Map; Jackson serializes it to JSON
         Map<String, Object> requestBody = Map.of(
@@ -109,7 +114,8 @@ public class OpenAIService {
 
     private String buildPrompt(PullRequestMetadata metadata,
                                 List<ChangedFile> files,
-                                List<RiskScore> riskScores) {
+                                List<RiskScore> riskScores,
+                                List<String> contextChunks) {
         // Cap the number of files and patch size to control token usage
         List<ChangedFile> capped = files.stream().limit(maxFiles).toList();
 
@@ -134,6 +140,15 @@ public class OpenAIService {
               .append(": ").append(rs.riskLevel())
               .append(" (score=").append(rs.score()).append(")")
               .append(" reasons=").append(rs.reasons()).append("\n");
+        }
+
+        // Inject retrieved repository context (RAG) — helps AI understand project conventions
+        if (contextChunks != null && !contextChunks.isEmpty()) {
+            sb.append("\nRepository Context (retrieved from indexed docs):\n");
+            for (int i = 0; i < contextChunks.size(); i++) {
+                sb.append("--- Context Chunk ").append(i + 1).append(" ---\n");
+                sb.append(contextChunks.get(i)).append("\n\n");
+            }
         }
 
         sb.append("\nDiff Snippets:\n");
