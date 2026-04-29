@@ -1,0 +1,46 @@
+services:
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: patchlens
+      POSTGRES_USER: patchlens
+      POSTGRES_PASSWORD: patchlens
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data      # persist DB across restarts
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql  # runs once on first start
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U patchlens"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  backend:
+    build: ./backend
+    ports:
+      - "8080:8080"
+    environment:
+      # Override application.properties so backend connects to Docker services by name
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/patchlens
+      SPRING_DATASOURCE_USERNAME: patchlens
+      SPRING_DATASOURCE_PASSWORD: patchlens
+      SPRING_DATA_REDIS_HOST: redis
+      # Secrets — set these in a .env file (never commit that file)
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AI_MODE: ${AI_MODE:-mock}
+    depends_on:
+      postgres:
+        condition: service_healthy   # wait for postgres to be ready before starting
+      redis:
+        condition: service_started
+
+volumes:
+  postgres_data:
