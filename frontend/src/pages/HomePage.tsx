@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { analyzePr } from '../api'
+import { analyzePr, analyzeSample } from '../api'
 
 export default function HomePage() {
   const [url, setUrl] = useState('')
   const [loading, setLoading] = useState(false)
+  const [sampleLoading, setSampleLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
 
@@ -14,12 +15,24 @@ export default function HomePage() {
     setLoading(true)
     try {
       const data = await analyzePr(url)
-      // Pass data via router state so ResultPage doesn't need to re-fetch
       navigate(`/result/${data.reviewSessionId}`, { state: { data } })
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function handleSample() {
+    setError(null)
+    setSampleLoading(true)
+    try {
+      const data = await analyzeSample('redis-session-cache')
+      navigate(`/result/${data.reviewSessionId}`, { state: { data } })
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Something went wrong')
+    } finally {
+      setSampleLoading(false)
     }
   }
 
@@ -54,13 +67,31 @@ export default function HomePage() {
           )}
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || sampleLoading}
             className="mt-4 w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400
                        text-white font-medium py-2.5 rounded-lg text-sm transition-colors"
           >
             {loading ? 'Analyzing…' : 'Analyze PR'}
           </button>
         </form>
+
+        {/* Divider */}
+        <div className="flex items-center gap-3 my-4">
+          <div className="flex-1 h-px bg-gray-200" />
+          <span className="text-xs text-gray-400">or</span>
+          <div className="flex-1 h-px bg-gray-200" />
+        </div>
+
+        {/* Sample button */}
+        <button
+          onClick={handleSample}
+          disabled={loading || sampleLoading}
+          className="w-full bg-white hover:bg-gray-50 disabled:bg-gray-100
+                     border border-gray-200 text-gray-700 font-medium py-2.5
+                     rounded-xl text-sm transition-colors shadow-sm"
+        >
+          {sampleLoading ? 'Loading sample…' : '✦ Try Sample PR — no GitHub token needed'}
+        </button>
       </div>
     </div>
   )
