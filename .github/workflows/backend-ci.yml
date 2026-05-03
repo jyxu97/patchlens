@@ -1,0 +1,29 @@
+name: Backend CI
+
+# Run when backend code changes on push or pull request to main
+on:
+  push:
+    branches: [main]
+    paths: ['backend/**']
+  pull_request:
+    branches: [main]
+    paths: ['backend/**']
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'         # caches ~/.m2 between runs for faster builds
+
+      # Run only pure unit tests (no Spring context, no external services needed)
+      - name: Run unit tests
+        run: ./mvnw test -Dtest="GitHubPrUrlParserTest,DiffParserServiceTest,RiskScoringServiceTest" -DfailIfNoTests=false
+        working-directory: backend
