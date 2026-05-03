@@ -1,6 +1,8 @@
 import type { AnalyzeResponse } from './types'
 
-const BASE_URL = 'http://localhost:8080'
+// In production, set VITE_API_BASE_URL to the backend's public URL (e.g. Lightsail IP)
+// In local dev, falls back to localhost:8080
+const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
 
 // POST /api/reviews/analyze — analyze a real GitHub PR by URL
 export async function analyzePr(pullRequestUrl: string): Promise<AnalyzeResponse> {

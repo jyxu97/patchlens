@@ -36,6 +36,8 @@ services:
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AI_MODE: ${AI_MODE:-mock}
+      # Set to Vercel URL after frontend is deployed, e.g. https://patchlens.vercel.app
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173}
     depends_on:
       postgres:
         condition: service_healthy   # wait for postgres to be ready before starting
