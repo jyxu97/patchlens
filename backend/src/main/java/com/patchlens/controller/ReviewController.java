@@ -3,6 +3,7 @@ package com.patchlens.controller;
 import com.patchlens.dto.AnalyzePullRequestRequest;
 import com.patchlens.exception.GitHubApiException;
 import com.patchlens.model.*;
+import com.patchlens.repository.AnalysisRunRepository;
 import com.patchlens.repository.ReviewSessionRepository;
 import com.patchlens.service.*;
 import jakarta.validation.Valid;
@@ -29,6 +30,7 @@ public class ReviewController {
     private final CacheService cacheService;
     private final ContextRetrievalService contextRetrievalService;
     private final ReviewSessionRepository sessionRepository;
+    private final AnalysisRunRepository analysisRunRepository;
     private final ObjectMapper objectMapper;
 
     public ReviewController(SamplePrLoader samplePrLoader,
@@ -40,6 +42,7 @@ public class ReviewController {
                             CacheService cacheService,
                             ContextRetrievalService contextRetrievalService,
                             ReviewSessionRepository sessionRepository,
+                            AnalysisRunRepository analysisRunRepository,
                             ObjectMapper objectMapper) {
         this.samplePrLoader = samplePrLoader;
         this.urlParser = urlParser;
@@ -50,6 +53,7 @@ public class ReviewController {
         this.cacheService = cacheService;
         this.contextRetrievalService = contextRetrievalService;
         this.sessionRepository = sessionRepository;
+        this.analysisRunRepository = analysisRunRepository;
         this.objectMapper = objectMapper;
     }
 
@@ -60,6 +64,7 @@ public class ReviewController {
      */
     @PostMapping("/analyze")
     public ResponseEntity<?> analyze(@Valid @RequestBody AnalyzePullRequestRequest request) {
+        long totalStart = System.currentTimeMillis();
 
         var parsed = urlParser.parse(request.pullRequestUrl());
         if (parsed.isEmpty()) {
@@ -88,6 +93,11 @@ public class ReviewController {
         // Check cache first — if the diff hasn't changed, skip AI entirely
         Optional<ReviewResult> cached = cacheService.get(cacheKey);
         if (cached.isPresent()) {
+            long totalMs = System.currentTimeMillis() - totalStart;
+            analysisRunRepository.save(new AnalysisRun(
+                    request.pullRequestUrl(), null, diffHash,
+                    true, 0, 0, totalMs, 0, 0, "cached", "success", null
+            ));
             return ResponseEntity.ok(Map.of(
                     "repository", pr.owner() + "/" + pr.repo(),
                     "pullRequestNumber", pr.pullNumber(),
@@ -103,22 +113,36 @@ public class ReviewController {
         RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
 
         // Retrieve top-k repository context chunks from pgvector for RAG
+        long retrievalStart = System.currentTimeMillis();
         List<String> contextChunks = contextRetrievalService
                 .retrieve(metadata, files, riskScores)
                 .stream()
                 .map(RepositoryContextChunk::getContent)
                 .toList();
+        long retrievalMs = System.currentTimeMillis() - retrievalStart;
 
-        ReviewResult reviewResult = openAIService.generateReview(metadata, files, riskScores, contextChunks);
+        long llmStart = System.currentTimeMillis();
+        OpenAIService.GenerateReviewResult generated =
+                openAIService.generateReview(metadata, files, riskScores, contextChunks);
+        long llmMs = System.currentTimeMillis() - llmStart;
 
-        cacheService.put(cacheKey, reviewResult, cacheService.ttlForGitHubPr());
+        long totalMs = System.currentTimeMillis() - totalStart;
 
-        // Persist the session to PostgreSQL
+        cacheService.put(cacheKey, generated.reviewResult(), cacheService.ttlForGitHubPr());
+
+        // Persist the session and analysis run to PostgreSQL
         ReviewSession session = new ReviewSession(
                 pr.owner(), pr.repo(), pr.pullNumber(), metadata.url(),
-                diffHash, cacheKey, "github", toJson(reviewResult)
+                diffHash, cacheKey, "github", toJson(generated.reviewResult())
         );
         sessionRepository.save(session);
+
+        analysisRunRepository.save(new AnalysisRun(
+                request.pullRequestUrl(), null, diffHash,
+                false, retrievalMs, llmMs, totalMs,
+                generated.promptTokens(), generated.completionTokens(),
+                generated.modelName(), "success", null
+        ));
 
         return ResponseEntity.ok(Map.of(
                 "reviewSessionId", session.getId(),
@@ -129,7 +153,7 @@ public class ReviewController {
                 "cacheHit", false,
                 "overallRisk", overallRisk,
                 "riskScores", riskScores,
-                "result", reviewResult
+                "result", generated.reviewResult()
         ));
     }
 
@@ -140,6 +164,7 @@ public class ReviewController {
      */
     @PostMapping("/analyze-sample")
     public ResponseEntity<?> analyzeSample(@Valid @RequestBody AnalyzeSampleRequest request) {
+        long totalStart = System.currentTimeMillis();
 
         SamplePrLoader.SamplePr sample;
         try {
@@ -157,6 +182,11 @@ public class ReviewController {
         // Check cache first
         Optional<ReviewResult> cached = cacheService.get(cacheKey);
         if (cached.isPresent()) {
+            long totalMs = System.currentTimeMillis() - totalStart;
+            analysisRunRepository.save(new AnalysisRun(
+                    null, request.sampleId(), diffHash,
+                    true, 0, 0, totalMs, 0, 0, "cached", "success", null
+            ));
             return ResponseEntity.ok(Map.of(
                     "sampleId", request.sampleId(),
                     "repository", sample.metadata().owner() + "/" + sample.metadata().repo(),
@@ -173,23 +203,37 @@ public class ReviewController {
         RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
 
         // Retrieve top-k repository context chunks from pgvector for RAG
+        long retrievalStart = System.currentTimeMillis();
         List<String> contextChunks = contextRetrievalService
                 .retrieve(sample.metadata(), sample.files(), riskScores)
                 .stream()
                 .map(RepositoryContextChunk::getContent)
                 .toList();
+        long retrievalMs = System.currentTimeMillis() - retrievalStart;
 
-        ReviewResult reviewResult = openAIService.generateReview(sample.metadata(), sample.files(), riskScores, contextChunks);
+        long llmStart = System.currentTimeMillis();
+        OpenAIService.GenerateReviewResult generated =
+                openAIService.generateReview(sample.metadata(), sample.files(), riskScores, contextChunks);
+        long llmMs = System.currentTimeMillis() - llmStart;
 
-        cacheService.put(cacheKey, reviewResult, cacheService.ttlForSamplePr());
+        long totalMs = System.currentTimeMillis() - totalStart;
 
-        // Persist the session to PostgreSQL
+        cacheService.put(cacheKey, generated.reviewResult(), cacheService.ttlForSamplePr());
+
+        // Persist the session and analysis run to PostgreSQL
         ReviewSession session = new ReviewSession(
                 sample.metadata().owner(), sample.metadata().repo(),
                 sample.metadata().pullNumber(), sample.metadata().url(),
-                diffHash, cacheKey, "sample", toJson(reviewResult)
+                diffHash, cacheKey, "sample", toJson(generated.reviewResult())
         );
         sessionRepository.save(session);
+
+        analysisRunRepository.save(new AnalysisRun(
+                null, request.sampleId(), diffHash,
+                false, retrievalMs, llmMs, totalMs,
+                generated.promptTokens(), generated.completionTokens(),
+                generated.modelName(), "success", null
+        ));
 
         return ResponseEntity.ok(Map.of(
                 "reviewSessionId", session.getId(),
@@ -201,7 +245,7 @@ public class ReviewController {
                 "cacheHit", false,
                 "overallRisk", overallRisk,
                 "riskScores", riskScores,
-                "result", reviewResult
+                "result", generated.reviewResult()
         ));
     }
 

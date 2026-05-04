@@ -40,20 +40,33 @@ public class OpenAIService {
     }
 
     /**
+     * Holds the AI-generated review alongside token usage metadata.
+     *
+     * @param promptTokens     tokens consumed by the input prompt (0 in mock mode)
+     * @param completionTokens tokens consumed by the model's response (0 in mock mode)
+     * @param modelName        model used (e.g. "gpt-4o-mini"); "mock" in mock mode
+     */
+    public record GenerateReviewResult(
+            ReviewResult reviewResult,
+            int promptTokens,
+            int completionTokens,
+            String modelName
+    ) {}
+
+    /**
      * Generates a structured review brief.
      * In mock mode, returns a deterministic fixture without calling OpenAI.
      *
      * @param contextChunks retrieved repository context from pgvector (may be empty)
      */
-    public ReviewResult generateReview(PullRequestMetadata metadata,
-                                       List<ChangedFile> files,
-                                       List<RiskScore> riskScores,
-                                       List<String> contextChunks) {
+    public GenerateReviewResult generateReview(PullRequestMetadata metadata,
+                                               List<ChangedFile> files,
+                                               List<RiskScore> riskScores,
+                                               List<String> contextChunks) {
         if ("mock".equalsIgnoreCase(aiMode)) {
-            return mockResult(metadata);
+            return new GenerateReviewResult(mockResult(metadata), 0, 0, "mock");
         }
         return callOpenAI(metadata, files, riskScores, contextChunks);
-
     }
 
     // --- mock mode ---
@@ -78,10 +91,10 @@ public class OpenAIService {
 
     // --- real OpenAI call ---
 
-    private ReviewResult callOpenAI(PullRequestMetadata metadata,
-                                    List<ChangedFile> files,
-                                    List<RiskScore> riskScores,
-                                    List<String> contextChunks) {
+    private GenerateReviewResult callOpenAI(PullRequestMetadata metadata,
+                                            List<ChangedFile> files,
+                                            List<RiskScore> riskScores,
+                                            List<String> contextChunks) {
         String userPrompt = buildPrompt(metadata, files, riskScores, contextChunks);
 
         // Build the request body as a Map; Jackson serializes it to JSON
@@ -103,10 +116,14 @@ public class OpenAIService {
         // Extract the content string from choices[0].message.content
         String content = response.get("choices").get(0).get("message").get("content").asString();
 
+        // Extract token usage from the response (safe: path() returns a missing node, not null)
+        int promptTokens     = response.path("usage").path("prompt_tokens").asInt(0);
+        int completionTokens = response.path("usage").path("completion_tokens").asInt(0);
+
         try {
             ReviewResult result = objectMapper.readValue(content, ReviewResult.class);
             validate(result);
-            return result;
+            return new GenerateReviewResult(result, promptTokens, completionTokens, model);
         } catch (Exception e) {
             throw new RuntimeException("Failed to parse AI response: " + e.getMessage(), e);
         }

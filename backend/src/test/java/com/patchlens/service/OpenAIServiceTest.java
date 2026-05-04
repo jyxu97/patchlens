@@ -1,7 +1,6 @@
 package com.patchlens.service;
 
 import com.patchlens.model.PullRequestMetadata;
-import com.patchlens.model.ReviewResult;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -46,16 +45,17 @@ class OpenAIServiceTest {
         var service = buildService("mock");
         var metadata = sampleMetadata();
 
-        ReviewResult result = service.generateReview(metadata, List.of(), List.of(), List.of());
+        var generated = service.generateReview(metadata, List.of(), List.of(), List.of());
 
-        assertThat(result.summary().title()).isEqualTo(metadata.title());
+        assertThat(generated.reviewResult().summary().title()).isEqualTo(metadata.title());
     }
 
     @Test
     void mockResultShouldHaveAllRequiredFields() {
         var service = buildService("mock");
 
-        ReviewResult result = service.generateReview(sampleMetadata(), List.of(), List.of(), List.of());
+        var generated = service.generateReview(sampleMetadata(), List.of(), List.of(), List.of());
+        var result = generated.reviewResult();
 
         assertThat(result.summary()).isNotNull();
         assertThat(result.riskAssessment()).isNotNull();
@@ -67,18 +67,37 @@ class OpenAIServiceTest {
     void mockModeShouldHandleNullContextChunksWithoutThrowing() {
         var service = buildService("mock");
 
-        ReviewResult result = service.generateReview(sampleMetadata(), List.of(), List.of(), null);
+        var generated = service.generateReview(sampleMetadata(), List.of(), List.of(), null);
 
-        assertThat(result).isNotNull();
+        assertThat(generated.reviewResult()).isNotNull();
     }
 
     @Test
     void mockModeShouldBeCaseInsensitive() {
         var service = buildService("MOCK");
 
-        ReviewResult result = service.generateReview(sampleMetadata(), List.of(), List.of(), List.of());
+        var generated = service.generateReview(sampleMetadata(), List.of(), List.of(), List.of());
 
-        assertThat(result).isNotNull();
+        assertThat(generated.reviewResult()).isNotNull();
         verifyNoInteractions(restClient);
+    }
+
+    @Test
+    void mockModeShouldReturnZeroTokens() {
+        var service = buildService("mock");
+
+        var generated = service.generateReview(sampleMetadata(), List.of(), List.of(), List.of());
+
+        assertThat(generated.promptTokens()).isZero();
+        assertThat(generated.completionTokens()).isZero();
+    }
+
+    @Test
+    void mockModeModelNameShouldBeMock() {
+        var service = buildService("mock");
+
+        var generated = service.generateReview(sampleMetadata(), List.of(), List.of(), List.of());
+
+        assertThat(generated.modelName()).isEqualTo("mock");
     }
 }
