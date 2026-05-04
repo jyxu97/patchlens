@@ -20,7 +20,8 @@ public class CorsConfig {
     public CorsFilter corsFilter() {
         CorsConfiguration config = new CorsConfiguration();
         for (String origin : allowedOrigins.split(",")) {
-            config.addAllowedOrigin(origin.trim());
+            // addAllowedOriginPattern supports wildcards, e.g. https://*.vercel.app
+            config.addAllowedOriginPattern(origin.trim());
         }
         config.addAllowedMethod("*");
         config.addAllowedHeader("*");
