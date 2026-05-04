@@ -1,0 +1,37 @@
+{
+  "id": "db-migration",
+  "metadata": {
+    "owner": "example",
+    "repo": "user-service",
+    "pullNumber": 17,
+    "title": "Migrate auth to OAuth 2.0 — add tokens table, drop legacy password columns",
+    "body": "This PR migrates user authentication from username/password to OAuth 2.0. A Flyway migration creates the oauth_tokens table and drops the legacy password_hash and password_salt columns. AuthController is updated to use the OAuth callback flow and UserService removes the now-obsolete password helpers.",
+    "url": "https://github.com/example/user-service/pull/17"
+  },
+  "files": [
+    {
+      "filename": "db/migration/V5__add_oauth_token_drop_password.sql",
+      "status": "added",
+      "additions": 18,
+      "deletions": 0,
+      "changes": 18,
+      "patch": "@@ -0,0 +1,18 @@\n+-- Create OAuth tokens table\n+CREATE TABLE oauth_tokens (\n+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n+    user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,\n+    provider      VARCHAR(50) NOT NULL,\n+    access_token  TEXT NOT NULL,\n+    refresh_token TEXT,\n+    expires_at    TIMESTAMP,\n+    created_at    TIMESTAMP DEFAULT NOW()\n+);\n+\n+CREATE INDEX idx_oauth_tokens_user_id ON oauth_tokens(user_id);\n+\n+-- Remove legacy password columns (irreversible)\n+ALTER TABLE users DROP COLUMN password_hash;\n+ALTER TABLE users DROP COLUMN password_salt;"
+    },
+    {
+      "filename": "src/main/java/com/example/auth/AuthController.java",
+      "status": "modified",
+      "additions": 22,
+      "deletions": 18,
+      "changes": 40,
+      "patch": "@@ -1,18 +1,22 @@\n package com.example.auth;\n \n-import com.example.user.UserRepository;\n+import com.example.oauth.OAuthService;\n import org.springframework.web.bind.annotation.*;\n \n @RestController\n @RequestMapping(\"/api/auth\")\n public class AuthController {\n \n-    private final UserRepository userRepository;\n-    private final PasswordEncoder passwordEncoder;\n+    private final OAuthService oAuthService;\n \n-    @PostMapping(\"/login\")\n-    public ResponseEntity<LoginResponse> login(@RequestBody LoginRequest req) {\n-        User user = userRepository.findByEmail(req.email())\n-                .orElseThrow(() -> new UnauthorizedException(\"Invalid credentials\"));\n-        if (!passwordEncoder.matches(req.password(), user.getPasswordHash())) {\n-            throw new UnauthorizedException(\"Invalid credentials\");\n-        }\n-        String token = jwtService.generateToken(user);\n-        return ResponseEntity.ok(new LoginResponse(token));\n+    @GetMapping(\"/oauth2/callback\")\n+    public ResponseEntity<LoginResponse> oauthCallback(@RequestParam String code,\n+                                                        @RequestParam String state) {\n+        OAuthToken token = oAuthService.exchangeCode(code, state);\n+        return ResponseEntity.ok(new LoginResponse(token.accessToken()));\n+    }\n+\n+    @PostMapping(\"/logout\")\n+    public ResponseEntity<Void> logout(@RequestHeader(\"Authorization\") String bearer) {\n+        oAuthService.revokeToken(bearer.replace(\"Bearer \", \"\"));\n+        return ResponseEntity.noContent().build();\n     }\n }"
+    },
+    {
+      "filename": "src/main/java/com/example/user/UserService.java",
+      "status": "modified",
+      "additions": 5,
+      "deletions": 12,
+      "changes": 17,
+      "patch": "@@ -10,17 +10,10 @@\n     public UserService(UserRepository repository) {\n         this.repository = repository;\n     }\n \n-    public void updatePassword(String userId, String newPassword) {\n-        String hashed = passwordEncoder.encode(newPassword);\n-        repository.updatePasswordHash(userId, hashed);\n-    }\n-\n-    public boolean verifyPassword(String userId, String rawPassword) {\n-        String hash = repository.getPasswordHash(userId);\n-        return passwordEncoder.matches(rawPassword, hash);\n-    }\n+    public User findById(String userId) {\n+        return repository.findById(userId)\n+                .orElseThrow(() -> new UserNotFoundException(userId));\n+    }\n }"
+    }
+  ]
+}

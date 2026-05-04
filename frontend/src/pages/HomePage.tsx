@@ -2,10 +2,34 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { analyzePr, analyzeSample } from '../api'
 
+const SAMPLES = [
+  {
+    id: 'redis-session-cache',
+    title: 'Redis Session Cache',
+    description: 'Replaces in-memory sessions with a Redis-backed cache layer',
+    risk: 'Medium',
+    riskColor: 'bg-yellow-100 text-yellow-800',
+  },
+  {
+    id: 'db-migration',
+    title: 'Auth DB Migration',
+    description: 'Migrates auth to OAuth 2.0, drops legacy password columns',
+    risk: 'High',
+    riskColor: 'bg-red-100 text-red-800',
+  },
+  {
+    id: 'stripe-checkout',
+    title: 'Stripe Checkout',
+    description: 'Adds Stripe subscription billing and webhook handler',
+    risk: 'High',
+    riskColor: 'bg-red-100 text-red-800',
+  },
+]
+
 export default function HomePage() {
   const [url, setUrl] = useState('')
   const [loading, setLoading] = useState(false)
-  const [sampleLoading, setSampleLoading] = useState(false)
+  const [loadingSampleId, setLoadingSampleId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const navigate = useNavigate()
 
@@ -23,18 +47,20 @@ export default function HomePage() {
     }
   }
 
-  async function handleSample() {
+  async function handleSample(sampleId: string) {
     setError(null)
-    setSampleLoading(true)
+    setLoadingSampleId(sampleId)
     try {
-      const data = await analyzeSample('redis-session-cache')
+      const data = await analyzeSample(sampleId)
       navigate(`/result/${data.reviewSessionId}`, { state: { data } })
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Something went wrong')
     } finally {
-      setSampleLoading(false)
+      setLoadingSampleId(null)
     }
   }
+
+  const busy = loading || loadingSampleId !== null
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
@@ -67,7 +93,7 @@ export default function HomePage() {
           )}
           <button
             type="submit"
-            disabled={loading || sampleLoading}
+            disabled={busy}
             className="mt-4 w-full bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400
                        text-white font-medium py-2.5 rounded-lg text-sm transition-colors"
           >
@@ -78,20 +104,33 @@ export default function HomePage() {
         {/* Divider */}
         <div className="flex items-center gap-3 my-4">
           <div className="flex-1 h-px bg-gray-200" />
-          <span className="text-xs text-gray-400">or</span>
+          <span className="text-xs text-gray-400">or try a sample</span>
           <div className="flex-1 h-px bg-gray-200" />
         </div>
 
-        {/* Sample button */}
-        <button
-          onClick={handleSample}
-          disabled={loading || sampleLoading}
-          className="w-full bg-white hover:bg-gray-50 disabled:bg-gray-100
-                     border border-gray-200 text-gray-700 font-medium py-2.5
-                     rounded-xl text-sm transition-colors shadow-sm"
-        >
-          {sampleLoading ? 'Loading sample…' : '✦ Try Sample PR — no GitHub token needed'}
-        </button>
+        {/* Sample cards */}
+        <div className="grid grid-cols-3 gap-3">
+          {SAMPLES.map(sample => (
+            <button
+              key={sample.id}
+              onClick={() => handleSample(sample.id)}
+              disabled={busy}
+              className="bg-white border border-gray-200 rounded-xl p-4 text-left shadow-sm
+                         hover:border-blue-300 hover:shadow-md disabled:opacity-50
+                         transition-all flex flex-col gap-2"
+            >
+              <div className="flex items-start justify-between gap-1">
+                <span className="text-xs font-semibold text-gray-800 leading-snug">
+                  {loadingSampleId === sample.id ? 'Loading…' : sample.title}
+                </span>
+                <span className={`shrink-0 text-xs font-medium px-1.5 py-0.5 rounded-full ${sample.riskColor}`}>
+                  {sample.risk}
+                </span>
+              </div>
+              <p className="text-xs text-gray-500 leading-snug">{sample.description}</p>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   )

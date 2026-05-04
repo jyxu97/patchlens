@@ -1,0 +1,45 @@
+{
+  "id": "stripe-checkout",
+  "metadata": {
+    "owner": "example",
+    "repo": "saas-platform",
+    "pullNumber": 88,
+    "title": "Add Stripe subscription checkout and webhook handler",
+    "body": "Integrates Stripe Checkout for subscription billing. Adds a CheckoutService that creates Stripe Checkout Sessions, a SubscriptionController with /api/billing endpoints, a webhook handler that processes subscription lifecycle events, and a stripe-payment.yml config file for Stripe credentials loaded from environment variables.",
+    "url": "https://github.com/example/saas-platform/pull/88"
+  },
+  "files": [
+    {
+      "filename": "src/main/resources/config/stripe-payment.yml",
+      "status": "added",
+      "additions": 10,
+      "deletions": 0,
+      "changes": 10,
+      "patch": "@@ -0,0 +1,10 @@\n+stripe:\n+  api-key: ${STRIPE_SECRET_KEY}\n+  webhook-secret: ${STRIPE_WEBHOOK_SECRET}\n+  price-ids:\n+    pro-monthly: ${STRIPE_PRICE_PRO_MONTHLY}\n+    pro-annual:  ${STRIPE_PRICE_PRO_ANNUAL}\n+  success-url: ${APP_BASE_URL}/billing/success\n+  cancel-url:  ${APP_BASE_URL}/billing/cancel"
+    },
+    {
+      "filename": "src/main/java/com/example/billing/CheckoutService.java",
+      "status": "added",
+      "additions": 38,
+      "deletions": 0,
+      "changes": 38,
+      "patch": "@@ -0,0 +1,38 @@\n+package com.example.billing;\n+\n+import com.stripe.Stripe;\n+import com.stripe.exception.StripeException;\n+import com.stripe.model.checkout.Session;\n+import com.stripe.param.checkout.SessionCreateParams;\n+import org.springframework.stereotype.Service;\n+\n+@Service\n+public class CheckoutService {\n+\n+    private final StripeProperties props;\n+\n+    public CheckoutService(StripeProperties props) {\n+        Stripe.apiKey = props.apiKey();\n+        this.props = props;\n+    }\n+\n+    public String createCheckoutSession(String userId, String priceId) throws StripeException {\n+        SessionCreateParams params = SessionCreateParams.builder()\n+                .setMode(SessionCreateParams.Mode.SUBSCRIPTION)\n+                .setSuccessUrl(props.successUrl() + \"?session_id={CHECKOUT_SESSION_ID}\")\n+                .setCancelUrl(props.cancelUrl())\n+                .addLineItem(SessionCreateParams.LineItem.builder()\n+                        .setPrice(priceId)\n+                        .setQuantity(1L)\n+                        .build())\n+                .putMetadata(\"userId\", userId)\n+                .build();\n+        return Session.create(params).getUrl();\n+    }\n+}"
+    },
+    {
+      "filename": "src/main/java/com/example/billing/SubscriptionController.java",
+      "status": "added",
+      "additions": 32,
+      "deletions": 0,
+      "changes": 32,
+      "patch": "@@ -0,0 +1,32 @@\n+package com.example.billing;\n+\n+import org.springframework.http.ResponseEntity;\n+import org.springframework.security.core.annotation.AuthenticationPrincipal;\n+import org.springframework.security.core.userdetails.UserDetails;\n+import org.springframework.web.bind.annotation.*;\n+\n+@RestController\n+@RequestMapping(\"/api/billing\")\n+public class SubscriptionController {\n+\n+    private final CheckoutService checkoutService;\n+    private final SubscriptionRepository subscriptionRepository;\n+\n+    @PostMapping(\"/checkout\")\n+    public ResponseEntity<CheckoutResponse> startCheckout(\n+            @RequestBody CheckoutRequest req,\n+            @AuthenticationPrincipal UserDetails user) throws StripeException {\n+        String url = checkoutService.createCheckoutSession(user.getUsername(), req.priceId());\n+        return ResponseEntity.ok(new CheckoutResponse(url));\n+    }\n+\n+    @GetMapping(\"/status\")\n+    public ResponseEntity<SubscriptionStatus> getStatus(\n+            @AuthenticationPrincipal UserDetails user) {\n+        return ResponseEntity.ok(subscriptionRepository.findByUserId(user.getUsername()));\n+    }\n+}"
+    },
+    {
+      "filename": "src/main/java/com/example/webhook/StripeWebhookHandler.java",
+      "status": "added",
+      "additions": 35,
+      "deletions": 0,
+      "changes": 35,
+      "patch": "@@ -0,0 +1,35 @@\n+package com.example.webhook;\n+\n+import com.stripe.model.Event;\n+import com.stripe.net.Webhook;\n+import org.springframework.http.ResponseEntity;\n+import org.springframework.web.bind.annotation.*;\n+\n+@RestController\n+@RequestMapping(\"/api/webhooks\")\n+public class StripeWebhookHandler {\n+\n+    private final SubscriptionService subscriptionService;\n+    private final String webhookSecret;\n+\n+    @PostMapping(\"/stripe\")\n+    public ResponseEntity<Void> handleStripeEvent(\n+            @RequestBody String payload,\n+            @RequestHeader(\"Stripe-Signature\") String signature) throws Exception {\n+        Event event = Webhook.constructEvent(payload, signature, webhookSecret);\n+        switch (event.getType()) {\n+            case \"customer.subscription.created\" -> subscriptionService.activate(event);\n+            case \"customer.subscription.deleted\" -> subscriptionService.cancel(event);\n+            case \"invoice.payment_failed\"        -> subscriptionService.notifyFailed(event);\n+        }\n+        return ResponseEntity.ok().build();\n+    }\n+}"
+    }
+  ]
+}
