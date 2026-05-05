@@ -29,6 +29,12 @@ export interface ReviewResult {
   reviewChecklist: string[]
 }
 
+export interface RetrievedChunk {
+  filePath: string
+  contentPreview: string
+  similarityScore: number
+}
+
 // Response from POST /api/reviews/analyze or /analyze-sample
 // Some fields are absent on cache-hit or when fetching a saved session by ID
 export interface AnalyzeResponse {
@@ -41,6 +47,7 @@ export interface AnalyzeResponse {
   overallRisk?: RiskLevel
   riskScores?: RiskScore[]
   result: ReviewResult
+  retrievedContext?: RetrievedChunk[]
   mode?: string
   createdAt?: string
 }

@@ -11,20 +11,24 @@ import java.util.UUID;
 public interface ContextChunkRepository extends JpaRepository<RepositoryContextChunk, UUID> {
 
     /**
-     * Finds the top-k most similar chunks to the given query vector,
-     * filtered by repository. Uses pgvector's cosine distance operator (<=>) .
+     * Finds the top-k most similar chunks to the given query vector, returning
+     * file_path, content, and cosine similarity score for each result.
      *
-     * The query vector is passed as a string "[0.1,0.2,...]" and cast to
-     * the vector type inside the query.
+     * Each row in the result is an Object[] with three elements:
+     *   [0] file_path        (String)
+     *   [1] content          (String)
+     *   [2] similarity_score (double) — 1 minus cosine distance, range 0.0–1.0
      */
     @Query(value = """
-            SELECT * FROM repository_context_chunks
+            SELECT file_path, content,
+                   1 - (embedding <=> CAST(:queryVector AS vector)) AS similarity_score
+            FROM repository_context_chunks
             WHERE repository_owner = :owner
               AND repository_name  = :repo
             ORDER BY embedding <=> CAST(:queryVector AS vector)
             LIMIT :k
             """, nativeQuery = true)
-    List<RepositoryContextChunk> findTopKSimilar(
+    List<Object[]> findTopKSimilarWithScore(
             @Param("owner") String owner,
             @Param("repo") String repo,
             @Param("queryVector") String queryVector,

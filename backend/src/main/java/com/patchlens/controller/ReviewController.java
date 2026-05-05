@@ -12,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import tools.jackson.databind.ObjectMapper;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -114,12 +115,14 @@ public class ReviewController {
 
         // Retrieve top-k repository context chunks from pgvector for RAG
         long retrievalStart = System.currentTimeMillis();
-        List<String> contextChunks = contextRetrievalService
-                .retrieve(metadata, files, riskScores)
-                .stream()
-                .map(RepositoryContextChunk::getContent)
-                .toList();
+        List<RetrievedContextChunk> retrieved = contextRetrievalService
+                .retrieve(metadata, files, riskScores);
         long retrievalMs = System.currentTimeMillis() - retrievalStart;
+
+        // Full content goes to OpenAI; previews + scores go to the API response
+        List<String> contextChunks = retrieved.stream()
+                .map(RetrievedContextChunk::content)
+                .toList();
 
         long llmStart = System.currentTimeMillis();
         OpenAIService.GenerateReviewResult generated =
@@ -144,17 +147,24 @@ public class ReviewController {
                 generated.modelName(), "success", null
         ));
 
-        return ResponseEntity.ok(Map.of(
-                "reviewSessionId", session.getId(),
-                "repository", pr.owner() + "/" + pr.repo(),
-                "pullRequestNumber", pr.pullNumber(),
-                "title", metadata.title(),
-                "diffHash", diffHash,
-                "cacheHit", false,
-                "overallRisk", overallRisk,
-                "riskScores", riskScores,
-                "result", generated.reviewResult()
-        ));
+        Map<String, Object> analyzeResponse = new HashMap<>();
+        analyzeResponse.put("reviewSessionId", session.getId());
+        analyzeResponse.put("repository", pr.owner() + "/" + pr.repo());
+        analyzeResponse.put("pullRequestNumber", pr.pullNumber());
+        analyzeResponse.put("title", metadata.title());
+        analyzeResponse.put("diffHash", diffHash);
+        analyzeResponse.put("cacheHit", false);
+        analyzeResponse.put("overallRisk", overallRisk);
+        analyzeResponse.put("riskScores", riskScores);
+        analyzeResponse.put("result", generated.reviewResult());
+        analyzeResponse.put("retrievedContext", retrieved.stream()
+                .map(c -> Map.of(
+                        "filePath", c.filePath(),
+                        "contentPreview", c.contentPreview(),
+                        "similarityScore", Math.round(c.similarityScore() * 1000.0) / 1000.0
+                ))
+                .toList());
+        return ResponseEntity.ok(analyzeResponse);
     }
 
     /**
@@ -204,12 +214,14 @@ public class ReviewController {
 
         // Retrieve top-k repository context chunks from pgvector for RAG
         long retrievalStart = System.currentTimeMillis();
-        List<String> contextChunks = contextRetrievalService
-                .retrieve(sample.metadata(), sample.files(), riskScores)
-                .stream()
-                .map(RepositoryContextChunk::getContent)
-                .toList();
+        List<RetrievedContextChunk> retrieved = contextRetrievalService
+                .retrieve(sample.metadata(), sample.files(), riskScores);
         long retrievalMs = System.currentTimeMillis() - retrievalStart;
+
+        // Full content goes to OpenAI; previews + scores go to the API response
+        List<String> contextChunks = retrieved.stream()
+                .map(RetrievedContextChunk::content)
+                .toList();
 
         long llmStart = System.currentTimeMillis();
         OpenAIService.GenerateReviewResult generated =
@@ -235,18 +247,25 @@ public class ReviewController {
                 generated.modelName(), "success", null
         ));
 
-        return ResponseEntity.ok(Map.of(
-                "reviewSessionId", session.getId(),
-                "sampleId", request.sampleId(),
-                "repository", sample.metadata().owner() + "/" + sample.metadata().repo(),
-                "pullRequestNumber", sample.metadata().pullNumber(),
-                "title", sample.metadata().title(),
-                "diffHash", diffHash,
-                "cacheHit", false,
-                "overallRisk", overallRisk,
-                "riskScores", riskScores,
-                "result", generated.reviewResult()
-        ));
+        Map<String, Object> sampleResponse = new HashMap<>();
+        sampleResponse.put("reviewSessionId", session.getId());
+        sampleResponse.put("sampleId", request.sampleId());
+        sampleResponse.put("repository", sample.metadata().owner() + "/" + sample.metadata().repo());
+        sampleResponse.put("pullRequestNumber", sample.metadata().pullNumber());
+        sampleResponse.put("title", sample.metadata().title());
+        sampleResponse.put("diffHash", diffHash);
+        sampleResponse.put("cacheHit", false);
+        sampleResponse.put("overallRisk", overallRisk);
+        sampleResponse.put("riskScores", riskScores);
+        sampleResponse.put("result", generated.reviewResult());
+        sampleResponse.put("retrievedContext", retrieved.stream()
+                .map(c -> Map.of(
+                        "filePath", c.filePath(),
+                        "contentPreview", c.contentPreview(),
+                        "similarityScore", Math.round(c.similarityScore() * 1000.0) / 1000.0
+                ))
+                .toList());
+        return ResponseEntity.ok(sampleResponse);
     }
 
     /**

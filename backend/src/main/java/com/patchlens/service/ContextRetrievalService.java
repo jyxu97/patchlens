@@ -2,7 +2,7 @@ package com.patchlens.service;
 
 import com.patchlens.model.ChangedFile;
 import com.patchlens.model.PullRequestMetadata;
-import com.patchlens.model.RepositoryContextChunk;
+import com.patchlens.model.RetrievedContextChunk;
 import com.patchlens.model.RiskScore;
 import com.patchlens.repository.ContextChunkRepository;
 import org.springframework.stereotype.Service;
@@ -27,17 +27,25 @@ public class ContextRetrievalService {
      * Retrieves the top-k most relevant context chunks for a given PR.
      * Builds a query string from PR metadata and risky files, embeds it,
      * then performs a cosine similarity search in pgvector.
+     *
+     * @return chunks with file path, full content, and similarity score
      */
-    public List<RepositoryContextChunk> retrieve(PullRequestMetadata metadata,
-                                                  List<ChangedFile> files,
-                                                  List<RiskScore> riskScores) {
+    public List<RetrievedContextChunk> retrieve(PullRequestMetadata metadata,
+                                                List<ChangedFile> files,
+                                                List<RiskScore> riskScores) {
         String query = buildQuery(metadata, files, riskScores);
         float[] queryEmbedding = embeddingService.embed(query);
         String queryVector = embeddingService.toVectorString(queryEmbedding);
 
-        return chunkRepository.findTopKSimilar(
-                metadata.owner(), metadata.repo(), queryVector, TOP_K
-        );
+        return chunkRepository
+                .findTopKSimilarWithScore(metadata.owner(), metadata.repo(), queryVector, TOP_K)
+                .stream()
+                .map(row -> new RetrievedContextChunk(
+                        (String) row[0],                                                 // file_path
+                        (String) row[1],                                                 // content
+                        row[2] instanceof Number n ? n.doubleValue() : 0.0               // similarity_score
+                ))
+                .toList();
     }
 
     /**

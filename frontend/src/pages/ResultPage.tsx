@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useParams } from 'react-router-dom'
 import { getReview } from '../api'
-import type { AnalyzeResponse, RiskLevel } from '../types'
+import type { AnalyzeResponse, RetrievedChunk, RiskLevel } from '../types'
 
 // Badge color for each risk level
 const riskBadge: Record<RiskLevel, string> = {
@@ -45,7 +45,7 @@ export default function ResultPage() {
     )
   }
 
-  const { result, riskScores, cacheHit } = data
+  const { result, riskScores, cacheHit, retrievedContext } = data
   // Fallback: title from summary, overallRisk from riskAssessment
   const title = data.title ?? result.summary.title
   const overallRisk = data.overallRisk ?? result.riskAssessment.overallRisk
@@ -158,6 +158,33 @@ export default function ResultPage() {
             ))}
           </ul>
         </section>
+
+        {/* Retrieved Context */}
+        {retrievedContext && retrievedContext.length > 0 && (
+          <section className="bg-white rounded-xl border border-gray-200 p-6">
+            <h2 className="font-semibold text-gray-900 mb-1">Retrieved Context</h2>
+            <p className="text-xs text-gray-400 mb-4">
+              Repository chunks retrieved via pgvector to ground the AI review
+            </p>
+            <div className="space-y-4">
+              {retrievedContext.map((chunk: RetrievedChunk, i: number) => (
+                <div key={i} className="border border-gray-100 rounded-lg p-3">
+                  <div className="flex items-center justify-between gap-3 mb-2">
+                    <span className="text-xs font-mono text-gray-700 break-all">
+                      {chunk.filePath}
+                    </span>
+                    <span className="shrink-0 text-xs font-medium text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
+                      {(chunk.similarityScore * 100).toFixed(1)}% match
+                    </span>
+                  </div>
+                  <p className="text-xs text-gray-500 font-mono leading-relaxed whitespace-pre-wrap">
+                    {chunk.contentPreview}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
       </div>
     </div>
