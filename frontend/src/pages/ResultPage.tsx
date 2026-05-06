@@ -121,7 +121,7 @@ export default function ResultPage() {
               {result.riskAssessment.riskyFiles.map((f, i) => (
                 <div key={i} className="flex items-start justify-between gap-4">
                   <div>
-                    <p className="text-sm font-mono text-gray-700">{f.path}</p>
+                    <p className="text-sm font-mono text-gray-700 break-all">{f.path}</p>
                     <p className="text-xs text-gray-500 mt-0.5">{f.reason}</p>
                   </div>
                   <span className={`text-xs font-semibold px-2 py-0.5 rounded-full shrink-0 ${riskBadge[f.riskLevel]}`}>
