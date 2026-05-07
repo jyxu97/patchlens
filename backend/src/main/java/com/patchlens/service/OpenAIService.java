@@ -129,7 +129,7 @@ public class OpenAIService {
         }
     }
 
-    private String buildPrompt(PullRequestMetadata metadata,
+    String buildPrompt(PullRequestMetadata metadata,
                                 List<ChangedFile> files,
                                 List<RiskScore> riskScores,
                                 List<String> contextChunks) {
