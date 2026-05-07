@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { analyzePr, analyzeSample } from '../api'
+import { analyzePr, analyzeSample, getMetrics } from '../api'
+import type { MetricsResponse } from '../types'
 
 const SAMPLES = [
   {
@@ -31,7 +32,12 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false)
   const [loadingSampleId, setLoadingSampleId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [metrics, setMetrics] = useState<MetricsResponse | null>(null)
   const navigate = useNavigate()
+
+  useEffect(() => {
+    getMetrics().then(setMetrics).catch(() => {})
+  }, [])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -69,6 +75,15 @@ export default function HomePage() {
         <div className="mb-8">
           <h1 className="text-4xl font-bold text-gray-900">PatchLens</h1>
           <p className="text-gray-500 mt-2">AI-powered pull request review assistant</p>
+          {metrics && (
+            <div className="flex gap-4 mt-3 text-xs text-gray-400 flex-wrap">
+              <span><span className="text-gray-600 font-medium">{metrics.totalAnalyses}</span> analyses</span>
+              <span>·</span>
+              <span><span className="text-gray-600 font-medium">{Math.round(metrics.cacheHitRate * 100)}%</span> cache hit rate</span>
+              <span>·</span>
+              <span>avg <span className="text-gray-600 font-medium">{(metrics.avgCacheMissLatencyMs / 1000).toFixed(1)}s</span> → <span className="text-gray-600 font-medium">{(metrics.avgCacheHitLatencyMs / 1000).toFixed(1)}s</span> cached</span>
+            </div>
+          )}
         </div>
 
         {/* Input card */}

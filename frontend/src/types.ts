@@ -1,5 +1,12 @@
 // TypeScript interfaces mirroring the Spring Boot backend JSON responses
 
+export interface MetricsResponse {
+  totalAnalyses: number
+  cacheHitRate: number
+  avgCacheMissLatencyMs: number
+  avgCacheHitLatencyMs: number
+}
+
 export type RiskLevel = 'low' | 'medium' | 'high'
 
 export interface RiskScore {
