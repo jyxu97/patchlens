@@ -31,6 +31,10 @@ public class AnalysisRun {
     @Column(name = "cache_hit", nullable = false)
     private boolean cacheHit;
 
+    /** Time spent fetching PR metadata and changed files from GitHub API. 0 for sample PRs. */
+    @Column(name = "github_latency_ms", nullable = false)
+    private long githubLatencyMs;
+
     /** Time spent in pgvector top-k retrieval. 0 on cache hits. */
     @Column(name = "retrieval_latency_ms", nullable = false)
     private long retrievalLatencyMs;
@@ -73,13 +77,14 @@ public class AnalysisRun {
 
     public AnalysisRun(String prUrl, String sampleId, String diffHash,
                        boolean cacheHit,
-                       long retrievalLatencyMs, long llmLatencyMs, long totalLatencyMs,
+                       long githubLatencyMs, long retrievalLatencyMs, long llmLatencyMs, long totalLatencyMs,
                        int promptTokens, int completionTokens,
                        String modelName, String status, String errorMessage) {
         this.prUrl = prUrl;
         this.sampleId = sampleId;
         this.diffHash = diffHash;
         this.cacheHit = cacheHit;
+        this.githubLatencyMs = githubLatencyMs;
         this.retrievalLatencyMs = retrievalLatencyMs;
         this.llmLatencyMs = llmLatencyMs;
         this.totalLatencyMs = totalLatencyMs;
@@ -95,6 +100,7 @@ public class AnalysisRun {
     public String getSampleId()          { return sampleId; }
     public String getDiffHash()          { return diffHash; }
     public boolean isCacheHit()          { return cacheHit; }
+    public long getGithubLatencyMs()     { return githubLatencyMs; }
     public long getRetrievalLatencyMs()  { return retrievalLatencyMs; }
     public long getLlmLatencyMs()        { return llmLatencyMs; }
     public long getTotalLatencyMs()      { return totalLatencyMs; }

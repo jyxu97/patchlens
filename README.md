@@ -15,7 +15,7 @@
 - RAG pipeline retrieves top-k repository context chunks from pgvector; file paths and similarity scores are returned alongside the review so the result is traceable, not a black box
 - Structured GPT output with JSON schema validation produces typed summaries, risky-file annotations, and test checklists
 - Redis caching by diff hash skips repeated LLM calls when the PR hasn't changed
-- Every analysis run logs retrieval latency, LLM latency, token usage, and cache-hit status to PostgreSQL
+- Every analysis run logs GitHub API latency, retrieval latency, LLM latency, token usage, and cache-hit status to PostgreSQL
 - Mock AI mode for local development without spending API credits
 
 ---
@@ -164,6 +164,7 @@ Every analysis request — cache hit or miss — writes one row to the `analysis
 | Field | Description |
 |-------|-------------|
 | `cache_hit` | Whether the result was served from Redis |
+| `github_latency_ms` | Time spent fetching PR metadata and files from GitHub API (0 for sample PRs) |
 | `retrieval_latency_ms` | Time spent in pgvector top-k retrieval |
 | `llm_latency_ms` | Time waiting for the OpenAI API response |
 | `total_latency_ms` | End-to-end wall-clock time for the request |

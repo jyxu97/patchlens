@@ -78,9 +78,12 @@ public class ReviewController {
 
         PullRequestMetadata metadata;
         List<ChangedFile> files;
+        long githubMs;
         try {
+            long githubStart = System.currentTimeMillis();
             metadata = gitHubService.fetchMetadata(pr.owner(), pr.repo(), pr.pullNumber());
             files = gitHubService.fetchChangedFiles(pr.owner(), pr.repo(), pr.pullNumber());
+            githubMs = System.currentTimeMillis() - githubStart;
         } catch (GitHubApiException e) {
             return ResponseEntity.badRequest().body(Map.of(
                     "error", e.getErrorCode(),
@@ -97,7 +100,7 @@ public class ReviewController {
             long totalMs = System.currentTimeMillis() - totalStart;
             analysisRunRepository.save(new AnalysisRun(
                     request.pullRequestUrl(), null, diffHash,
-                    true, 0, 0, totalMs, 0, 0, "cached", "success", null
+                    true, githubMs, 0, 0, totalMs, 0, 0, "cached", "success", null
             ));
             return ResponseEntity.ok(Map.of(
                     "repository", pr.owner() + "/" + pr.repo(),
@@ -142,7 +145,7 @@ public class ReviewController {
 
         analysisRunRepository.save(new AnalysisRun(
                 request.pullRequestUrl(), null, diffHash,
-                false, retrievalMs, llmMs, totalMs,
+                false, githubMs, retrievalMs, llmMs, totalMs,
                 generated.promptTokens(), generated.completionTokens(),
                 generated.modelName(), "success", null
         ));
@@ -195,7 +198,7 @@ public class ReviewController {
             long totalMs = System.currentTimeMillis() - totalStart;
             analysisRunRepository.save(new AnalysisRun(
                     null, request.sampleId(), diffHash,
-                    true, 0, 0, totalMs, 0, 0, "cached", "success", null
+                    true, 0, 0, 0, totalMs, 0, 0, "cached", "success", null
             ));
             return ResponseEntity.ok(Map.of(
                     "sampleId", request.sampleId(),
@@ -242,7 +245,7 @@ public class ReviewController {
 
         analysisRunRepository.save(new AnalysisRun(
                 null, request.sampleId(), diffHash,
-                false, retrievalMs, llmMs, totalMs,
+                false, 0, retrievalMs, llmMs, totalMs,
                 generated.promptTokens(), generated.completionTokens(),
                 generated.modelName(), "success", null
         ));
