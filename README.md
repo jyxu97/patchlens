@@ -83,7 +83,7 @@ Review Result Dashboard
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yvie97/patchlens.git
+git clone https://github.com/jyxu97/patchlens.git
 cd patchlens
 ```
 
