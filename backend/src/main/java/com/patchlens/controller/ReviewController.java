@@ -29,6 +29,7 @@ public class ReviewController {
     private final RiskScoringService riskScoringService;
     private final OpenAIService openAIService;
     private final CacheService cacheService;
+    private final ContextIndexingService contextIndexingService;
     private final ContextRetrievalService contextRetrievalService;
     private final ReviewSessionRepository sessionRepository;
     private final AnalysisRunRepository analysisRunRepository;
@@ -41,6 +42,7 @@ public class ReviewController {
                             RiskScoringService riskScoringService,
                             OpenAIService openAIService,
                             CacheService cacheService,
+                            ContextIndexingService contextIndexingService,
                             ContextRetrievalService contextRetrievalService,
                             ReviewSessionRepository sessionRepository,
                             AnalysisRunRepository analysisRunRepository,
@@ -52,6 +54,7 @@ public class ReviewController {
         this.riskScoringService = riskScoringService;
         this.openAIService = openAIService;
         this.cacheService = cacheService;
+        this.contextIndexingService = contextIndexingService;
         this.contextRetrievalService = contextRetrievalService;
         this.sessionRepository = sessionRepository;
         this.analysisRunRepository = analysisRunRepository;
@@ -115,6 +118,11 @@ public class ReviewController {
         // Cache miss: run full pipeline
         List<RiskScore> riskScores = riskScoringService.score(files);
         RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
+
+        // Auto-index repo on first analysis so RAG has context to retrieve from
+        if (!contextIndexingService.isIndexed(pr.owner(), pr.repo())) {
+            contextIndexingService.autoIndex(pr.owner(), pr.repo(), files);
+        }
 
         // Retrieve top-k repository context chunks from pgvector for RAG
         long retrievalStart = System.currentTimeMillis();

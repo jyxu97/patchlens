@@ -35,6 +35,9 @@ public interface ContextChunkRepository extends JpaRepository<RepositoryContextC
             @Param("k") int k
     );
 
+    /** Returns true if any chunks exist for the given repository. */
+    boolean existsByRepositoryOwnerAndRepositoryName(String repositoryOwner, String repositoryName);
+
     /** Deletes all chunks for a repository — used when re-indexing. */
     void deleteByRepositoryOwnerAndRepositoryName(String owner, String repo);
 }

@@ -1,5 +1,6 @@
 package com.patchlens.service;
 
+import com.patchlens.model.ChangedFile;
 import com.patchlens.model.RepositoryContextChunk;
 import com.patchlens.repository.ContextChunkRepository;
 import org.slf4j.Logger;
@@ -31,6 +32,29 @@ public class ContextIndexingService {
         this.restClient = restClient;
         this.embeddingService = embeddingService;
         this.chunkRepository = chunkRepository;
+    }
+
+    /**
+     * Returns true if the repository has already been indexed.
+     * Used to decide whether auto-indexing is needed before analysis.
+     */
+    public boolean isIndexed(String owner, String repo) {
+        return chunkRepository.existsByRepositoryOwnerAndRepositoryName(owner, repo);
+    }
+
+    /**
+     * Auto-indexes a repository on first analysis: README.md plus up to 5 changed files.
+     * Only called when isIndexed() returns false.
+     */
+    public void autoIndex(String owner, String repo, List<ChangedFile> changedFiles) {
+        List<String> filesToIndex = new ArrayList<>();
+        filesToIndex.add("README.md");
+        changedFiles.stream()
+                .map(ChangedFile::filename)
+                .limit(5)
+                .forEach(filesToIndex::add);
+        log.info("Auto-indexing {}/{} for first-time analysis ({} files)", owner, repo, filesToIndex.size());
+        indexFiles(owner, repo, filesToIndex);
     }
 
     /**
