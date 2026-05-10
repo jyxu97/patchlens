@@ -1,6 +1,6 @@
 package com.patchlens.service;
 
-import com.patchlens.model.ReviewResult;
+import com.patchlens.model.CachedAnalysis;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -41,14 +41,15 @@ public class CacheService {
     // --- get and put ---
 
     /**
-     * Returns the cached ReviewResult for the given key, or empty if not cached.
-     * If Redis is unavailable, logs a warning and returns empty (cache miss).
+     * Returns the cached CachedAnalysis for the given key, or empty if not cached.
+     * If Redis is unavailable or the entry cannot be deserialized, logs a warning
+     * and returns empty (treated as a cache miss).
      */
-    public Optional<ReviewResult> get(String key) {
+    public Optional<CachedAnalysis> get(String key) {
         try {
             String json = redisTemplate.opsForValue().get(key);
             if (json == null) return Optional.empty();
-            return Optional.of(objectMapper.readValue(json, ReviewResult.class));
+            return Optional.of(objectMapper.readValue(json, CachedAnalysis.class));
         } catch (Exception e) {
             log.warn("Cache get failed for key '{}': {}", key, e.getMessage());
             return Optional.empty();
@@ -56,12 +57,12 @@ public class CacheService {
     }
 
     /**
-     * Stores a ReviewResult in Redis with the given TTL.
+     * Stores a CachedAnalysis in Redis with the given TTL.
      * If Redis is unavailable, logs a warning and continues silently.
      */
-    public void put(String key, ReviewResult result, Duration ttl) {
+    public void put(String key, CachedAnalysis analysis, Duration ttl) {
         try {
-            String json = objectMapper.writeValueAsString(result);
+            String json = objectMapper.writeValueAsString(analysis);
             redisTemplate.opsForValue().set(key, json, ttl);
         } catch (Exception e) {
             log.warn("Cache put failed for key '{}': {}", key, e.getMessage());

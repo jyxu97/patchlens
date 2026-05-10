@@ -98,20 +98,30 @@ public class ReviewController {
         String cacheKey = cacheService.reviewKey(pr.owner(), pr.repo(), pr.pullNumber(), diffHash);
 
         // Check cache first — if the diff hasn't changed, skip AI entirely
-        Optional<ReviewResult> cached = cacheService.get(cacheKey);
+        Optional<CachedAnalysis> cached = cacheService.get(cacheKey);
         if (cached.isPresent()) {
             long totalMs = System.currentTimeMillis() - totalStart;
             analysisRunRepository.save(new AnalysisRun(
                     request.pullRequestUrl(), null, diffHash,
                     true, githubMs, 0, 0, totalMs, 0, 0, "cached", "success", null
             ));
+            CachedAnalysis ca = cached.get();
             return ResponseEntity.ok(Map.of(
                     "repository", pr.owner() + "/" + pr.repo(),
                     "pullRequestNumber", pr.pullNumber(),
                     "title", metadata.title(),
                     "diffHash", diffHash,
                     "cacheHit", true,
-                    "result", cached.get()
+                    "overallRisk", ca.overallRisk(),
+                    "riskScores", ca.riskScores(),
+                    "result", ca.reviewResult(),
+                    "retrievedContext", ca.retrievedContext().stream()
+                            .map(c -> Map.of(
+                                    "filePath", c.filePath(),
+                                    "contentPreview", c.contentPreview(),
+                                    "similarityScore", Math.round(c.similarityScore() * 1000.0) / 1000.0
+                            ))
+                            .toList()
             ));
         }
 
@@ -142,7 +152,9 @@ public class ReviewController {
 
         long totalMs = System.currentTimeMillis() - totalStart;
 
-        cacheService.put(cacheKey, generated.reviewResult(), cacheService.ttlForGitHubPr());
+        cacheService.put(cacheKey, new CachedAnalysis(
+                generated.reviewResult(), overallRisk, riskScores, retrieved
+        ), cacheService.ttlForGitHubPr());
 
         // Persist the session and analysis run to PostgreSQL
         ReviewSession session = new ReviewSession(
@@ -201,13 +213,14 @@ public class ReviewController {
         String cacheKey = cacheService.sampleKey(request.sampleId(), diffHash);
 
         // Check cache first
-        Optional<ReviewResult> cached = cacheService.get(cacheKey);
+        Optional<CachedAnalysis> cached = cacheService.get(cacheKey);
         if (cached.isPresent()) {
             long totalMs = System.currentTimeMillis() - totalStart;
             analysisRunRepository.save(new AnalysisRun(
                     null, request.sampleId(), diffHash,
                     true, 0, 0, 0, totalMs, 0, 0, "cached", "success", null
             ));
+            CachedAnalysis ca = cached.get();
             return ResponseEntity.ok(Map.of(
                     "sampleId", request.sampleId(),
                     "repository", sample.metadata().owner() + "/" + sample.metadata().repo(),
@@ -215,7 +228,16 @@ public class ReviewController {
                     "title", sample.metadata().title(),
                     "diffHash", diffHash,
                     "cacheHit", true,
-                    "result", cached.get()
+                    "overallRisk", ca.overallRisk(),
+                    "riskScores", ca.riskScores(),
+                    "result", ca.reviewResult(),
+                    "retrievedContext", ca.retrievedContext().stream()
+                            .map(c -> Map.of(
+                                    "filePath", c.filePath(),
+                                    "contentPreview", c.contentPreview(),
+                                    "similarityScore", Math.round(c.similarityScore() * 1000.0) / 1000.0
+                            ))
+                            .toList()
             ));
         }
 
@@ -241,7 +263,9 @@ public class ReviewController {
 
         long totalMs = System.currentTimeMillis() - totalStart;
 
-        cacheService.put(cacheKey, generated.reviewResult(), cacheService.ttlForSamplePr());
+        cacheService.put(cacheKey, new CachedAnalysis(
+                generated.reviewResult(), overallRisk, riskScores, retrieved
+        ), cacheService.ttlForSamplePr());
 
         // Persist the session and analysis run to PostgreSQL
         ReviewSession session = new ReviewSession(

@@ -1,6 +1,8 @@
 package com.patchlens.service;
 
+import com.patchlens.model.CachedAnalysis;
 import com.patchlens.model.ReviewResult;
+import com.patchlens.model.RiskScore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -78,22 +80,29 @@ class CacheServiceTest {
     }
 
     @Test
-    void getShouldDeserializeCachedResult() throws Exception {
+    void getShouldDeserializeCachedAnalysis() throws Exception {
         var objectMapper = new ObjectMapper();
-        var expected = new ReviewResult(
+        var reviewResult = new ReviewResult(
                 new ReviewResult.Summary("PR Title", "overview", List.of("change")),
                 new ReviewResult.RiskAssessment("low", List.of()),
                 List.of("write tests"),
                 List.of("review logic")
         );
-        String json = objectMapper.writeValueAsString(expected);
+        var cached = new CachedAnalysis(
+                reviewResult,
+                RiskScore.RiskLevel.low,
+                List.of(),
+                List.of()
+        );
+        String json = objectMapper.writeValueAsString(cached);
 
         when(redisTemplate.opsForValue()).thenReturn(valueOps);
         when(valueOps.get("cached-key")).thenReturn(json);
 
-        Optional<ReviewResult> result = cacheService.get("cached-key");
+        Optional<CachedAnalysis> result = cacheService.get("cached-key");
 
         assertThat(result).isPresent();
-        assertThat(result.get().summary().title()).isEqualTo("PR Title");
+        assertThat(result.get().reviewResult().summary().title()).isEqualTo("PR Title");
+        assertThat(result.get().overallRisk()).isEqualTo(RiskScore.RiskLevel.low);
     }
 }
