@@ -1,7 +1,6 @@
 package com.patchlens.service;
 
 import com.patchlens.model.ChangedFile;
-import com.patchlens.model.RepositoryContextChunk;
 import com.patchlens.repository.ContextChunkRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -73,9 +72,8 @@ public class ContextIndexingService {
                 List<String> chunks = chunk(content);
                 for (int i = 0; i < chunks.size(); i++) {
                     float[] embedding = embeddingService.embed(chunks.get(i));
-                    chunkRepository.save(new RepositoryContextChunk(
-                            owner, repo, filePath, i, chunks.get(i), embedding
-                    ));
+                    chunkRepository.insertChunk(owner, repo, filePath, i, chunks.get(i),
+                            embeddingService.toVectorString(embedding));
                     totalChunks++;
                 }
                 log.info("Indexed {} chunks from {}/{}/{}", chunks.size(), owner, repo, filePath);
@@ -96,7 +94,8 @@ public class ContextIndexingService {
         List<String> chunks = chunk(content);
         for (int i = 0; i < chunks.size(); i++) {
             float[] embedding = embeddingService.embed(chunks.get(i));
-            chunkRepository.save(new RepositoryContextChunk(owner, repo, filePath, i, chunks.get(i), embedding));
+            chunkRepository.insertChunk(owner, repo, filePath, i, chunks.get(i),
+                    embeddingService.toVectorString(embedding));
         }
         log.info("Seeded {} chunks for {}/{}/{}", chunks.size(), owner, repo, filePath);
     }

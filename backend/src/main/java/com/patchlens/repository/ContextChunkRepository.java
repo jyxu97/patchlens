@@ -2,8 +2,10 @@ package com.patchlens.repository;
 
 import com.patchlens.model.RepositoryContextChunk;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.UUID;
@@ -33,6 +35,28 @@ public interface ContextChunkRepository extends JpaRepository<RepositoryContextC
             @Param("repo") String repo,
             @Param("queryVector") String queryVector,
             @Param("k") int k
+    );
+
+    /**
+     * Inserts a single chunk with an explicit CAST to vector type.
+     * Required because JDBC passes the embedding string as character varying,
+     * which PostgreSQL rejects for vector columns without an explicit cast.
+     */
+    @Modifying
+    @Transactional
+    @Query(value = """
+            INSERT INTO repository_context_chunks
+              (id, repository_owner, repository_name, file_path, chunk_index, content, embedding, created_at)
+            VALUES
+              (gen_random_uuid(), :owner, :repo, :filePath, :chunkIndex, :content, CAST(:embedding AS vector), NOW())
+            """, nativeQuery = true)
+    void insertChunk(
+            @Param("owner") String owner,
+            @Param("repo") String repo,
+            @Param("filePath") String filePath,
+            @Param("chunkIndex") int chunkIndex,
+            @Param("content") String content,
+            @Param("embedding") String embedding
     );
 
     /** Returns true if any chunks exist for the given repository. */

@@ -40,8 +40,12 @@ public class SampleContextSeeder {
             return;
         }
         log.info("Seeding sample context for {}/{} ({} files)", owner, repo, files.size());
-        files.forEach((path, content) ->
-                contextIndexingService.indexTextContent(owner, repo, path, content));
+        try {
+            files.forEach((path, content) ->
+                    contextIndexingService.indexTextContent(owner, repo, path, content));
+        } catch (Exception e) {
+            log.warn("Failed to seed sample context for {}/{}: {}", owner, repo, e.getMessage());
+        }
     }
 
     // ---------------------------------------------------------------------------
