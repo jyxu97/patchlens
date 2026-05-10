@@ -87,6 +87,20 @@ public class ContextIndexingService {
         return totalChunks;
     }
 
+    /**
+     * Indexes pre-written text content without fetching from GitHub.
+     * Used to seed fixture context chunks for sample PRs at startup.
+     * Only called when isIndexed() returns false, so no delete step is needed.
+     */
+    public void indexTextContent(String owner, String repo, String filePath, String content) {
+        List<String> chunks = chunk(content);
+        for (int i = 0; i < chunks.size(); i++) {
+            float[] embedding = embeddingService.embed(chunks.get(i));
+            chunkRepository.save(new RepositoryContextChunk(owner, repo, filePath, i, chunks.get(i), embedding));
+        }
+        log.info("Seeded {} chunks for {}/{}/{}", chunks.size(), owner, repo, filePath);
+    }
+
     // --- file fetching ---
 
     private String fetchFileContent(String owner, String repo, String filePath) {

@@ -38,6 +38,7 @@ Spring Boot API (Railway)
         |-- ContextRetrieval     retrieve top-k chunks from pgvector
         |-- OpenAIService        generate structured review brief
         |-- AnalysisRunRepo      log latency, tokens, cache-hit per run
+        |-- SampleContextSeeder  seed fixture context chunks at startup (sample PRs)
         |
         |-- PostgreSQL + pgvector   review sessions, context chunks, analysis runs
         |-- Redis                   diff-hash result cache
@@ -143,7 +144,7 @@ The homepage offers three built-in sample PRs that run the full analysis pipelin
 | Auth DB Migration | Migrates auth to OAuth 2.0, drops legacy password columns | High |
 | Stripe Checkout | Adds Stripe subscription billing and webhook handler | High |
 
-Each sample exercises different risk scoring rules and produces a different AI review brief.
+Each sample exercises different risk scoring rules and produces a different AI review brief. Pre-seeded repository context chunks ensure the Retrieved Context panel is populated for all three samples, demonstrating the full RAG pipeline without requiring a real GitHub repository.
 
 ---
 
