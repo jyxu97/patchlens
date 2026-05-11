@@ -70,7 +70,7 @@ Review Result Dashboard
 1. User enters a GitHub PR URL (or clicks **Try Sample PR**)
 2. Backend fetches PR metadata and changed files from GitHub API
 3. Computes a SHA-256 hash of the normalized diff — checks Redis cache
-4. On cache miss: runs rule-based risk scoring; auto-indexes the repo (README + changed files) if this is the first analysis, then retrieves top-k repository context chunks from pgvector, calls OpenAI with the assembled prompt
+4. On cache miss: runs rule-based risk scoring; if the repo has never been indexed or the index is stale (tree SHA changed), triggers async file discovery — fetches the full repository tree, scores every file by path/name/extension, and embeds the top 50 highest-signal files into pgvector; then retrieves top-k repository context chunks, calls OpenAI with the assembled prompt
 5. Response includes the review brief, per-file risk scores, and retrieved context chunks with file paths and similarity scores
 6. Result is cached in Redis and persisted to PostgreSQL; latency breakdown and token usage are logged to the `analysis_runs` table
 7. Frontend displays the structured review brief and the retrieved context that grounded it

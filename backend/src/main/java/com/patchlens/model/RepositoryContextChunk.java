@@ -37,6 +37,10 @@ public class RepositoryContextChunk {
     @Convert(converter = FloatArrayConverter.class)
     private float[] embedding;
 
+    /** File category (DOC / CONFIG / SOURCE / API_SPEC / CI / BUILD). Null for manually indexed files. */
+    @Column(name = "file_type", length = 20)
+    private String fileType;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -65,5 +69,6 @@ public class RepositoryContextChunk {
     public int getChunkIndex() { return chunkIndex; }
     public String getContent() { return content; }
     public float[] getEmbedding() { return embedding; }
+    public String getFileType() { return fileType; }
     public Instant getCreatedAt() { return createdAt; }
 }

@@ -41,14 +41,15 @@ public interface ContextChunkRepository extends JpaRepository<RepositoryContextC
      * Inserts a single chunk with an explicit CAST to vector type.
      * Required because JDBC passes the embedding string as character varying,
      * which PostgreSQL rejects for vector columns without an explicit cast.
+     * fileType is nullable — pass null for manually indexed files.
      */
     @Modifying
     @Transactional
     @Query(value = """
             INSERT INTO repository_context_chunks
-              (id, repository_owner, repository_name, file_path, chunk_index, content, embedding, created_at)
+              (id, repository_owner, repository_name, file_path, chunk_index, content, embedding, file_type, created_at)
             VALUES
-              (gen_random_uuid(), :owner, :repo, :filePath, :chunkIndex, :content, CAST(:embedding AS vector), NOW())
+              (gen_random_uuid(), :owner, :repo, :filePath, :chunkIndex, :content, CAST(:embedding AS vector), :fileType, NOW())
             """, nativeQuery = true)
     void insertChunk(
             @Param("owner") String owner,
@@ -56,7 +57,8 @@ public interface ContextChunkRepository extends JpaRepository<RepositoryContextC
             @Param("filePath") String filePath,
             @Param("chunkIndex") int chunkIndex,
             @Param("content") String content,
-            @Param("embedding") String embedding
+            @Param("embedding") String embedding,
+            @Param("fileType") String fileType
     );
 
     /** Returns true if any chunks exist for the given repository. */

@@ -129,10 +129,14 @@ public class ReviewController {
         List<RiskScore> riskScores = riskScoringService.score(files);
         RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
 
-        // Auto-index repo on first analysis so RAG has context to retrieve from
-        if (!contextIndexingService.isIndexed(pr.owner(), pr.repo())) {
-            contextIndexingService.autoIndex(pr.owner(), pr.repo(), files);
+        // Trigger background indexing if this repo has never been indexed or index is stale.
+        // autoIndex() is async — it does not block this request.
+        // On first analysis, retrieved context will be empty; subsequent analyses benefit from the index.
+        boolean alreadyIndexed = contextIndexingService.isIndexed(pr.owner(), pr.repo());
+        if (!contextIndexingService.isUpToDate(pr.owner(), pr.repo())) {
+            contextIndexingService.autoIndex(pr.owner(), pr.repo());
         }
+        boolean indexing = !alreadyIndexed;
 
         // Retrieve top-k repository context chunks from pgvector for RAG
         long retrievalStart = System.currentTimeMillis();
@@ -177,6 +181,7 @@ public class ReviewController {
         analyzeResponse.put("title", metadata.title());
         analyzeResponse.put("diffHash", diffHash);
         analyzeResponse.put("cacheHit", false);
+        analyzeResponse.put("indexing", indexing);
         analyzeResponse.put("overallRisk", overallRisk);
         analyzeResponse.put("riskScores", riskScores);
         analyzeResponse.put("result", generated.reviewResult());

@@ -79,6 +79,44 @@ class CacheServiceTest {
         assertThat(cacheService.get("some-key")).isEmpty();
     }
 
+    // --- index SHA cache ---
+
+    @Test
+    void indexShaKeyShouldFollowExpectedFormat() {
+        String key = cacheService.indexShaKey("apache", "kafka");
+        assertThat(key).isEqualTo("patchlens:index:sha:apache:kafka");
+    }
+
+    @Test
+    void getIndexShaShouldReturnEmptyOnCacheMiss() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOps);
+        when(valueOps.get("patchlens:index:sha:owner:repo")).thenReturn(null);
+
+        assertThat(cacheService.getIndexSha("patchlens:index:sha:owner:repo")).isEmpty();
+    }
+
+    @Test
+    void getIndexShaShouldReturnCachedSha() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOps);
+        when(valueOps.get("patchlens:index:sha:owner:repo")).thenReturn("abc123def456");
+
+        Optional<String> result = cacheService.getIndexSha("patchlens:index:sha:owner:repo");
+
+        assertThat(result).isPresent();
+        assertThat(result.get()).isEqualTo("abc123def456");
+    }
+
+    @Test
+    void getIndexShaShouldReturnEmptyWhenRedisIsDown() {
+        when(redisTemplate.opsForValue()).thenReturn(valueOps);
+        when(valueOps.get("patchlens:index:sha:owner:repo"))
+                .thenThrow(new RuntimeException("connection refused"));
+
+        assertThat(cacheService.getIndexSha("patchlens:index:sha:owner:repo")).isEmpty();
+    }
+
+    // --- get (CachedAnalysis) ---
+
     @Test
     void getShouldDeserializeCachedAnalysis() throws Exception {
         var objectMapper = new ObjectMapper();

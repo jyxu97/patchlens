@@ -71,4 +71,33 @@ public class CacheService {
 
     public Duration ttlForGitHubPr() { return TTL_GITHUB_PR; }
     public Duration ttlForSamplePr() { return TTL_SAMPLE_PR; }
+
+    // --- repository index SHA cache ---
+
+    /** Key format: patchlens:index:sha:{owner}:{repo} */
+    public String indexShaKey(String owner, String repo) {
+        return "patchlens:index:sha:" + owner + ":" + repo;
+    }
+
+    /**
+     * Returns the cached tree SHA for a repository, or empty if not cached.
+     * Used to avoid a GitHub API call on every staleness check.
+     */
+    public Optional<String> getIndexSha(String key) {
+        try {
+            return Optional.ofNullable(redisTemplate.opsForValue().get(key));
+        } catch (Exception e) {
+            log.warn("Cache get failed for key '{}': {}", key, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /** Stores a tree SHA in Redis with the given TTL. */
+    public void putIndexSha(String key, String sha, Duration ttl) {
+        try {
+            redisTemplate.opsForValue().set(key, sha, ttl);
+        } catch (Exception e) {
+            log.warn("Cache put failed for key '{}': {}", key, e.getMessage());
+        }
+    }
 }
