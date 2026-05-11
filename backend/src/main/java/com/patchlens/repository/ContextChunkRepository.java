@@ -64,6 +64,15 @@ public interface ContextChunkRepository extends JpaRepository<RepositoryContextC
     /** Returns true if any chunks exist for the given repository. */
     boolean existsByRepositoryOwnerAndRepositoryName(String repositoryOwner, String repositoryName);
 
-    /** Deletes all chunks for a repository — used when re-indexing. */
-    void deleteByRepositoryOwnerAndRepositoryName(String owner, String repo);
+    /**
+     * Deletes all chunks for a repository — used when re-indexing.
+     * Explicit @Modifying + @Transactional required so this executes as a single
+     * bulk DELETE in its own transaction, which works correctly from @Async threads.
+     * (Derived deleteBy* without these annotations fails in threadpool threads:
+     * "No EntityManager with actual transaction available for current thread".)
+     */
+    @Modifying
+    @Transactional
+    @Query("DELETE FROM RepositoryContextChunk r WHERE r.repositoryOwner = :owner AND r.repositoryName = :repo")
+    void deleteByRepositoryOwnerAndRepositoryName(@Param("owner") String owner, @Param("repo") String repo);
 }
