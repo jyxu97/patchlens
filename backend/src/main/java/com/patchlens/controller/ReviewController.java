@@ -2,20 +2,18 @@ package com.patchlens.controller;
 
 import com.patchlens.dto.AnalyzePullRequestRequest;
 import com.patchlens.exception.GitHubApiException;
-import com.patchlens.model.*;
-import com.patchlens.repository.AnalysisRunRepository;
+import com.patchlens.model.ReviewResult;
 import com.patchlens.repository.ReviewSessionRepository;
-import com.patchlens.service.*;
+import com.patchlens.service.GitHubPrUrlParser;
+import com.patchlens.service.ReviewService;
+import com.patchlens.service.SamplePrLoader;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import tools.jackson.databind.ObjectMapper;
 
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.UUID;
 
 @RestController
@@ -24,41 +22,17 @@ public class ReviewController {
 
     private final SamplePrLoader samplePrLoader;
     private final GitHubPrUrlParser urlParser;
-    private final GitHubService gitHubService;
-    private final DiffParserService diffParserService;
-    private final RiskScoringService riskScoringService;
-    private final OpenAIService openAIService;
-    private final CacheService cacheService;
-    private final ContextIndexingService contextIndexingService;
-    private final ContextRetrievalService contextRetrievalService;
+    private final ReviewService reviewService;
     private final ReviewSessionRepository sessionRepository;
-    private final AnalysisRunRepository analysisRunRepository;
-    private final ObjectMapper objectMapper;
 
     public ReviewController(SamplePrLoader samplePrLoader,
                             GitHubPrUrlParser urlParser,
-                            GitHubService gitHubService,
-                            DiffParserService diffParserService,
-                            RiskScoringService riskScoringService,
-                            OpenAIService openAIService,
-                            CacheService cacheService,
-                            ContextIndexingService contextIndexingService,
-                            ContextRetrievalService contextRetrievalService,
-                            ReviewSessionRepository sessionRepository,
-                            AnalysisRunRepository analysisRunRepository,
-                            ObjectMapper objectMapper) {
+                            ReviewService reviewService,
+                            ReviewSessionRepository sessionRepository) {
         this.samplePrLoader = samplePrLoader;
         this.urlParser = urlParser;
-        this.gitHubService = gitHubService;
-        this.diffParserService = diffParserService;
-        this.riskScoringService = riskScoringService;
-        this.openAIService = openAIService;
-        this.cacheService = cacheService;
-        this.contextIndexingService = contextIndexingService;
-        this.contextRetrievalService = contextRetrievalService;
+        this.reviewService = reviewService;
         this.sessionRepository = sessionRepository;
-        this.analysisRunRepository = analysisRunRepository;
-        this.objectMapper = objectMapper;
     }
 
     /**
@@ -68,8 +42,6 @@ public class ReviewController {
      */
     @PostMapping("/analyze")
     public ResponseEntity<?> analyze(@Valid @RequestBody AnalyzePullRequestRequest request) {
-        long totalStart = System.currentTimeMillis();
-
         var parsed = urlParser.parse(request.pullRequestUrl());
         if (parsed.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of(
@@ -79,14 +51,9 @@ public class ReviewController {
         }
         var pr = parsed.get();
 
-        PullRequestMetadata metadata;
-        List<ChangedFile> files;
-        long githubMs;
+        ReviewService.AnalysisOutcome outcome;
         try {
-            long githubStart = System.currentTimeMillis();
-            metadata = gitHubService.fetchMetadata(pr.owner(), pr.repo(), pr.pullNumber());
-            files = gitHubService.fetchChangedFiles(pr.owner(), pr.repo(), pr.pullNumber());
-            githubMs = System.currentTimeMillis() - githubStart;
+            outcome = reviewService.runAnalysis(pr.owner(), pr.repo(), pr.pullNumber(), request.pullRequestUrl());
         } catch (GitHubApiException e) {
             return ResponseEntity.badRequest().body(Map.of(
                     "error", e.getErrorCode(),
@@ -94,105 +61,7 @@ public class ReviewController {
             ));
         }
 
-        String diffHash = diffParserService.hash(diffParserService.normalize(metadata, files));
-        String cacheKey = cacheService.reviewKey(pr.owner(), pr.repo(), pr.pullNumber(), diffHash);
-
-        // Check cache first — if the diff hasn't changed, skip AI entirely
-        Optional<CachedAnalysis> cached = cacheService.get(cacheKey);
-        if (cached.isPresent()) {
-            long totalMs = System.currentTimeMillis() - totalStart;
-            analysisRunRepository.save(new AnalysisRun(
-                    request.pullRequestUrl(), null, diffHash,
-                    true, githubMs, 0, 0, totalMs, 0, 0, "cached", "success", null
-            ));
-            CachedAnalysis ca = cached.get();
-            return ResponseEntity.ok(Map.of(
-                    "repository", pr.owner() + "/" + pr.repo(),
-                    "pullRequestNumber", pr.pullNumber(),
-                    "title", metadata.title(),
-                    "diffHash", diffHash,
-                    "cacheHit", true,
-                    "overallRisk", ca.overallRisk(),
-                    "riskScores", ca.riskScores(),
-                    "result", ca.reviewResult(),
-                    "retrievedContext", ca.retrievedContext().stream()
-                            .map(c -> Map.of(
-                                    "filePath", c.filePath(),
-                                    "contentPreview", c.contentPreview(),
-                                    "similarityScore", Math.round(c.similarityScore() * 1000.0) / 1000.0
-                            ))
-                            .toList()
-            ));
-        }
-
-        // Cache miss: run full pipeline
-        List<RiskScore> riskScores = riskScoringService.score(files);
-        RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
-
-        // Trigger background indexing if this repo has never been indexed or index is stale.
-        // autoIndex() is async — it does not block this request.
-        // On first analysis, retrieved context will be empty; subsequent analyses benefit from the index.
-        boolean alreadyIndexed = contextIndexingService.isIndexed(pr.owner(), pr.repo());
-        if (!contextIndexingService.isUpToDate(pr.owner(), pr.repo())) {
-            contextIndexingService.autoIndex(pr.owner(), pr.repo());
-        }
-        boolean indexing = !alreadyIndexed;
-
-        // Retrieve top-k repository context chunks from pgvector for RAG
-        long retrievalStart = System.currentTimeMillis();
-        List<RetrievedContextChunk> retrieved = contextRetrievalService
-                .retrieve(metadata, files, riskScores);
-        long retrievalMs = System.currentTimeMillis() - retrievalStart;
-
-        // Full content goes to OpenAI; previews + scores go to the API response
-        List<String> contextChunks = retrieved.stream()
-                .map(RetrievedContextChunk::content)
-                .toList();
-
-        long llmStart = System.currentTimeMillis();
-        OpenAIService.GenerateReviewResult generated =
-                openAIService.generateReview(metadata, files, riskScores, contextChunks);
-        long llmMs = System.currentTimeMillis() - llmStart;
-
-        long totalMs = System.currentTimeMillis() - totalStart;
-
-        cacheService.put(cacheKey, new CachedAnalysis(
-                generated.reviewResult(), overallRisk, riskScores, retrieved
-        ), cacheService.ttlForGitHubPr());
-
-        // Persist the session and analysis run to PostgreSQL
-        ReviewSession session = new ReviewSession(
-                pr.owner(), pr.repo(), pr.pullNumber(), metadata.url(),
-                diffHash, cacheKey, "github", toJson(generated.reviewResult())
-        );
-        sessionRepository.save(session);
-
-        analysisRunRepository.save(new AnalysisRun(
-                request.pullRequestUrl(), null, diffHash,
-                false, githubMs, retrievalMs, llmMs, totalMs,
-                generated.promptTokens(), generated.completionTokens(),
-                generated.modelName(), "success", null
-        ));
-
-        Map<String, Object> analyzeResponse = new HashMap<>();
-        analyzeResponse.put("reviewSessionId", session.getId());
-        analyzeResponse.put("repository", pr.owner() + "/" + pr.repo());
-        analyzeResponse.put("pullRequestNumber", pr.pullNumber());
-        analyzeResponse.put("title", metadata.title());
-        analyzeResponse.put("diffHash", diffHash);
-        analyzeResponse.put("cacheHit", false);
-        analyzeResponse.put("indexing", indexing);
-        analyzeResponse.put("overallRisk", overallRisk);
-        analyzeResponse.put("riskScores", riskScores);
-        analyzeResponse.put("result", generated.reviewResult());
-        analyzeResponse.put("retrievedContext", retrieved.stream()
-                .map(c -> Map.of(
-                        "filePath", c.filePath(),
-                        "contentPreview", c.contentPreview(),
-                        "similarityScore", Math.round(c.similarityScore() * 1000.0) / 1000.0
-                ))
-                .toList());
-        return ResponseEntity.ok(analyzeResponse);
+        return ResponseEntity.ok(outcomeToMap(outcome));
     }
 
     /**
@@ -202,8 +71,6 @@ public class ReviewController {
      */
     @PostMapping("/analyze-sample")
     public ResponseEntity<?> analyzeSample(@Valid @RequestBody AnalyzeSampleRequest request) {
-        long totalStart = System.currentTimeMillis();
-
         SamplePrLoader.SamplePr sample;
         try {
             sample = samplePrLoader.load(request.sampleId());
@@ -214,98 +81,11 @@ public class ReviewController {
             ));
         }
 
-        String diffHash = diffParserService.hash(diffParserService.normalize(sample.metadata(), sample.files()));
-        String cacheKey = cacheService.sampleKey(request.sampleId(), diffHash);
+        ReviewService.AnalysisOutcome outcome = reviewService.runSampleAnalysis(request.sampleId(), sample);
 
-        // Check cache first
-        Optional<CachedAnalysis> cached = cacheService.get(cacheKey);
-        if (cached.isPresent()) {
-            long totalMs = System.currentTimeMillis() - totalStart;
-            analysisRunRepository.save(new AnalysisRun(
-                    null, request.sampleId(), diffHash,
-                    true, 0, 0, 0, totalMs, 0, 0, "cached", "success", null
-            ));
-            CachedAnalysis ca = cached.get();
-            return ResponseEntity.ok(Map.of(
-                    "sampleId", request.sampleId(),
-                    "repository", sample.metadata().owner() + "/" + sample.metadata().repo(),
-                    "pullRequestNumber", sample.metadata().pullNumber(),
-                    "title", sample.metadata().title(),
-                    "diffHash", diffHash,
-                    "cacheHit", true,
-                    "overallRisk", ca.overallRisk(),
-                    "riskScores", ca.riskScores(),
-                    "result", ca.reviewResult(),
-                    "retrievedContext", ca.retrievedContext().stream()
-                            .map(c -> Map.of(
-                                    "filePath", c.filePath(),
-                                    "contentPreview", c.contentPreview(),
-                                    "similarityScore", Math.round(c.similarityScore() * 1000.0) / 1000.0
-                            ))
-                            .toList()
-            ));
-        }
-
-        // Cache miss: run full pipeline
-        List<RiskScore> riskScores = riskScoringService.score(sample.files());
-        RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
-
-        // Retrieve top-k repository context chunks from pgvector for RAG
-        long retrievalStart = System.currentTimeMillis();
-        List<RetrievedContextChunk> retrieved = contextRetrievalService
-                .retrieve(sample.metadata(), sample.files(), riskScores);
-        long retrievalMs = System.currentTimeMillis() - retrievalStart;
-
-        // Full content goes to OpenAI; previews + scores go to the API response
-        List<String> contextChunks = retrieved.stream()
-                .map(RetrievedContextChunk::content)
-                .toList();
-
-        long llmStart = System.currentTimeMillis();
-        OpenAIService.GenerateReviewResult generated =
-                openAIService.generateReview(sample.metadata(), sample.files(), riskScores, contextChunks);
-        long llmMs = System.currentTimeMillis() - llmStart;
-
-        long totalMs = System.currentTimeMillis() - totalStart;
-
-        cacheService.put(cacheKey, new CachedAnalysis(
-                generated.reviewResult(), overallRisk, riskScores, retrieved
-        ), cacheService.ttlForSamplePr());
-
-        // Persist the session and analysis run to PostgreSQL
-        ReviewSession session = new ReviewSession(
-                sample.metadata().owner(), sample.metadata().repo(),
-                sample.metadata().pullNumber(), sample.metadata().url(),
-                diffHash, cacheKey, "sample", toJson(generated.reviewResult())
-        );
-        sessionRepository.save(session);
-
-        analysisRunRepository.save(new AnalysisRun(
-                null, request.sampleId(), diffHash,
-                false, 0, retrievalMs, llmMs, totalMs,
-                generated.promptTokens(), generated.completionTokens(),
-                generated.modelName(), "success", null
-        ));
-
-        Map<String, Object> sampleResponse = new HashMap<>();
-        sampleResponse.put("reviewSessionId", session.getId());
-        sampleResponse.put("sampleId", request.sampleId());
-        sampleResponse.put("repository", sample.metadata().owner() + "/" + sample.metadata().repo());
-        sampleResponse.put("pullRequestNumber", sample.metadata().pullNumber());
-        sampleResponse.put("title", sample.metadata().title());
-        sampleResponse.put("diffHash", diffHash);
-        sampleResponse.put("cacheHit", false);
-        sampleResponse.put("overallRisk", overallRisk);
-        sampleResponse.put("riskScores", riskScores);
-        sampleResponse.put("result", generated.reviewResult());
-        sampleResponse.put("retrievedContext", retrieved.stream()
-                .map(c -> Map.of(
-                        "filePath", c.filePath(),
-                        "contentPreview", c.contentPreview(),
-                        "similarityScore", Math.round(c.similarityScore() * 1000.0) / 1000.0
-                ))
-                .toList());
-        return ResponseEntity.ok(sampleResponse);
+        Map<String, Object> response = new HashMap<>(outcomeToMap(outcome));
+        response.put("sampleId", request.sampleId());
+        return ResponseEntity.ok(response);
     }
 
     /**
@@ -316,7 +96,7 @@ public class ReviewController {
     public ResponseEntity<?> getReview(@PathVariable UUID reviewSessionId) {
         return sessionRepository.findById(reviewSessionId)
                 .map(session -> {
-                    ReviewResult result = fromJson(session.getResultJson());
+                    ReviewResult result = reviewService.fromJson(session.getResultJson());
                     return ResponseEntity.ok(Map.of(
                             "reviewSessionId", session.getId(),
                             "repository", session.getRepositoryOwner() + "/" + session.getRepositoryName(),
@@ -330,24 +110,30 @@ public class ReviewController {
                 .orElse(ResponseEntity.notFound().build());
     }
 
-    // --- helpers ---
-
-    private String toJson(ReviewResult result) {
-        try {
-            return objectMapper.writeValueAsString(result);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to serialize ReviewResult", e);
+    private Map<String, Object> outcomeToMap(ReviewService.AnalysisOutcome outcome) {
+        Map<String, Object> map = new HashMap<>();
+        if (outcome.reviewSessionId() != null) {
+            map.put("reviewSessionId", outcome.reviewSessionId());
         }
+        map.put("repository", outcome.owner() + "/" + outcome.repo());
+        map.put("pullRequestNumber", outcome.pullNumber());
+        map.put("title", outcome.title());
+        map.put("diffHash", outcome.diffHash());
+        map.put("cacheHit", outcome.cacheHit());
+        map.put("indexing", outcome.indexing());
+        map.put("overallRisk", outcome.overallRisk());
+        map.put("riskScores", outcome.riskScores());
+        map.put("result", outcome.reviewResult());
+        map.put("retrievedContext", outcome.retrievedContext().stream()
+                .map(c -> Map.of(
+                        "filePath", c.filePath(),
+                        "contentPreview", c.contentPreview(),
+                        "similarityScore", Math.round(c.similarityScore() * 1000.0) / 1000.0
+                ))
+                .toList());
+        return map;
     }
 
-    private ReviewResult fromJson(String json) {
-        try {
-            return objectMapper.readValue(json, ReviewResult.class);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to deserialize ReviewResult", e);
-        }
-    }
-
-    // Request body for analyze-sample endpoint only; kept here to avoid a separate file
+    // Request body for analyze-sample endpoint only
     record AnalyzeSampleRequest(@NotBlank String sampleId) {}
 }
