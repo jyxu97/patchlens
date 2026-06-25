@@ -23,13 +23,19 @@
 ## Architecture
 
 ```
-GitHub PR URL / Sample PR
+GitHub Webhook (PR opened/updated)
         |
         v
-React Frontend (Vercel)
+Spring Boot API  ──  WebhookController (POST /api/webhooks/github)
+        |                validates HMAC-SHA256 signature
+        |                creates ReviewJob (PENDING), idempotency check
         |
         v
-Spring Boot API (Railway)
+RabbitMQ  ──  review.jobs queue
+        |        3-attempt exponential-backoff retry (2s/4s/8s)
+        |        dead-letter queue on exhaustion
+        v
+ReviewJobWorker  ──  consumes queue messages
         |
         |-- GitHubService        fetch PR metadata and changed files
         |-- DiffParserService    normalize diffs, compute SHA-256 hash
@@ -37,14 +43,13 @@ Spring Boot API (Railway)
         |-- CacheService         check Redis for existing analysis
         |-- ContextRetrieval     retrieve top-k chunks from pgvector
         |-- OpenAIService        generate structured review brief
-        |-- AnalysisRunRepo      log latency, tokens, cache-hit per run
-        |-- SampleContextSeeder  seed fixture context chunks at startup (sample PRs)
+        |-- ReviewJobService     update job status (PROCESSING → COMPLETED)
         |
-        |-- PostgreSQL + pgvector   review sessions, context chunks, analysis runs
+        |-- PostgreSQL + pgvector   review jobs, sessions, context chunks
         |-- Redis                   diff-hash result cache
         |
         v
-Review Result Dashboard
+JobStatusEmitter  ──  SSE push to client (PENDING → PROCESSING → COMPLETED)
 ```
 
 ---
@@ -57,9 +62,10 @@ Review Result Dashboard
 | Frontend | React, TypeScript, Vite, Tailwind CSS |
 | Database | PostgreSQL + pgvector |
 | Cache | Redis |
+| Message Queue | RabbitMQ |
 | AI | OpenAI Chat Completions, OpenAI Embeddings |
 | External API | GitHub REST API |
-| Deployment | Vercel (frontend), Railway (backend) |
+| Deployment | Vercel (frontend) |
 | CI/CD | GitHub Actions |
 | Containerization | Docker, Docker Compose |
 
@@ -108,7 +114,9 @@ Set `AI_MODE=mock` to skip OpenAI calls during development.
 docker compose up --build
 ```
 
-This starts the Spring Boot backend, PostgreSQL (with pgvector), and Redis in Docker.
+This starts the Spring Boot backend, PostgreSQL (with pgvector), Redis, and RabbitMQ in Docker.
+
+RabbitMQ management UI is available at http://localhost:15672 (username/password: `patchlens`).
 
 ### 4. Start the frontend
 
@@ -127,9 +135,12 @@ Open http://localhost:5173
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/health` | Health check |
-| POST | `/api/reviews/analyze` | Analyze a GitHub PR by URL |
+| POST | `/api/reviews/analyze` | Analyze a GitHub PR by URL (synchronous) |
 | POST | `/api/reviews/analyze-sample` | Analyze a built-in sample PR |
 | GET | `/api/reviews/{id}` | Fetch a saved review by session ID |
+| POST | `/api/webhooks/github` | Receive GitHub PR webhook events |
+| GET | `/api/jobs/{id}` | Get current status of a review job |
+| GET | `/api/jobs/{id}/stream` | SSE stream of job status updates |
 | POST | `/api/repositories/index` | Index repository docs for RAG |
 
 ---
@@ -196,13 +207,13 @@ OpenAI is called with `response_format: json_object` and a strict JSON schema. T
 | `AI_MODE` | `mock` or `openai` | `mock` |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allowed origins | `http://localhost:5173` |
 | `OPENAI_MODEL` | GPT model to use | `gpt-4o-mini` |
+| `GITHUB_WEBHOOK_SECRET` | Secret for HMAC-SHA256 webhook validation | *(empty, skips validation)* |
 
 ---
 
 ## Future Improvements
 
 - GitHub App integration for automatic PR comment posting
-- Webhook-triggered analysis on PR creation/update
 - Support for private repositories via GitHub OAuth
 - Repository-wide indexing and chunk reranking
 - Historical analytics on risky PR patterns
