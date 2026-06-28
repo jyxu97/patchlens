@@ -27,6 +27,7 @@ public class ReviewService {
     private final ContextIndexingService contextIndexingService;
     private final ContextRetrievalService contextRetrievalService;
     private final GroundingValidationService groundingValidationService;
+    private final PromptVersionService promptVersionService;
     private final ReviewSessionRepository sessionRepository;
     private final AnalysisRunRepository analysisRunRepository;
     private final ObjectMapper objectMapper;
@@ -39,6 +40,7 @@ public class ReviewService {
                          ContextIndexingService contextIndexingService,
                          ContextRetrievalService contextRetrievalService,
                          GroundingValidationService groundingValidationService,
+                         PromptVersionService promptVersionService,
                          ReviewSessionRepository sessionRepository,
                          AnalysisRunRepository analysisRunRepository,
                          ObjectMapper objectMapper) {
@@ -50,6 +52,7 @@ public class ReviewService {
         this.contextIndexingService = contextIndexingService;
         this.contextRetrievalService = contextRetrievalService;
         this.groundingValidationService = groundingValidationService;
+        this.promptVersionService = promptVersionService;
         this.sessionRepository = sessionRepository;
         this.analysisRunRepository = analysisRunRepository;
         this.objectMapper = objectMapper;
@@ -99,7 +102,7 @@ public class ReviewService {
             long totalMs = System.currentTimeMillis() - totalStart;
             analysisRunRepository.save(new AnalysisRun(
                     prUrl, null, diffHash,
-                    true, githubMs, 0, 0, totalMs, 0, 0, "cached", "success", null, null, null
+                    true, githubMs, 0, 0, totalMs, 0, 0, "cached", "success", null, null, null, null
             ));
             CachedAnalysis ca = cached.get();
             return new AnalysisOutcome(
@@ -148,12 +151,16 @@ public class ReviewService {
         );
         sessionRepository.save(session);
 
+        UUID promptVersionId = promptVersionService.getCurrentVersion() != null
+                ? promptVersionService.getCurrentVersion().getId() : null;
+
         analysisRunRepository.save(new AnalysisRun(
                 prUrl, null, diffHash,
                 false, githubMs, retrievalMs, llmMs, totalMs,
                 generated.promptTokens(), generated.completionTokens(),
                 generated.modelName(), "success", null,
-                groundingReport.hallucinatedCount(), groundingReport.groundingRate()
+                groundingReport.hallucinatedCount(), groundingReport.groundingRate(),
+                promptVersionId
         ));
 
         return new AnalysisOutcome(
@@ -179,7 +186,7 @@ public class ReviewService {
             long totalMs = System.currentTimeMillis() - totalStart;
             analysisRunRepository.save(new AnalysisRun(
                     null, sampleId, diffHash,
-                    true, 0, 0, 0, totalMs, 0, 0, "cached", "success", null, null, null
+                    true, 0, 0, 0, totalMs, 0, 0, "cached", "success", null, null, null, null
             ));
             CachedAnalysis ca = cached.get();
             return new AnalysisOutcome(
@@ -224,12 +231,16 @@ public class ReviewService {
         );
         sessionRepository.save(session);
 
+        UUID promptVersionId = promptVersionService.getCurrentVersion() != null
+                ? promptVersionService.getCurrentVersion().getId() : null;
+
         analysisRunRepository.save(new AnalysisRun(
                 null, sampleId, diffHash,
                 false, 0, retrievalMs, llmMs, totalMs,
                 generated.promptTokens(), generated.completionTokens(),
                 generated.modelName(), "success", null,
-                groundingReport.hallucinatedCount(), groundingReport.groundingRate()
+                groundingReport.hallucinatedCount(), groundingReport.groundingRate(),
+                promptVersionId
         ));
 
         return new AnalysisOutcome(

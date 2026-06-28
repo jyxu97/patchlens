@@ -81,6 +81,13 @@ public class AnalysisRun {
     @Column(name = "grounding_rate")
     private Double groundingRate;
 
+    /**
+     * FK to the prompt_versions row that was active when this analysis ran.
+     * Null for cache hits (no AI call was made).
+     */
+    @Column(name = "prompt_version_id")
+    private UUID promptVersionId;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -94,7 +101,8 @@ public class AnalysisRun {
                        long githubLatencyMs, long retrievalLatencyMs, long llmLatencyMs, long totalLatencyMs,
                        int promptTokens, int completionTokens,
                        String modelName, String status, String errorMessage,
-                       Integer hallucinatedRefCount, Double groundingRate) {
+                       Integer hallucinatedRefCount, Double groundingRate,
+                       UUID promptVersionId) {
         this.prUrl = prUrl;
         this.sampleId = sampleId;
         this.diffHash = diffHash;
@@ -110,6 +118,7 @@ public class AnalysisRun {
         this.errorMessage = errorMessage;
         this.hallucinatedRefCount = hallucinatedRefCount;
         this.groundingRate = groundingRate;
+        this.promptVersionId = promptVersionId;
     }
 
     public UUID getId()                      { return id; }
@@ -128,5 +137,6 @@ public class AnalysisRun {
     public String getErrorMessage()          { return errorMessage; }
     public Integer getHallucinatedRefCount() { return hallucinatedRefCount; }
     public Double getGroundingRate()         { return groundingRate; }
+    public UUID getPromptVersionId()         { return promptVersionId; }
     public Instant getCreatedAt()            { return createdAt; }
 }
