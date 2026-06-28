@@ -67,6 +67,20 @@ public class AnalysisRun {
     @Column(name = "error_message", columnDefinition = "TEXT")
     private String errorMessage;
 
+    /**
+     * Number of risky-file paths in the AI response that were not present in
+     * the actual PR diff.  Null for cache hits (no AI call was made).
+     */
+    @Column(name = "hallucinated_ref_count")
+    private Integer hallucinatedRefCount;
+
+    /**
+     * Fraction of AI-mentioned risky-file paths that were grounded in the diff
+     * (groundedCount / totalRiskyFiles).  Null for cache hits.
+     */
+    @Column(name = "grounding_rate")
+    private Double groundingRate;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -79,7 +93,8 @@ public class AnalysisRun {
                        boolean cacheHit,
                        long githubLatencyMs, long retrievalLatencyMs, long llmLatencyMs, long totalLatencyMs,
                        int promptTokens, int completionTokens,
-                       String modelName, String status, String errorMessage) {
+                       String modelName, String status, String errorMessage,
+                       Integer hallucinatedRefCount, Double groundingRate) {
         this.prUrl = prUrl;
         this.sampleId = sampleId;
         this.diffHash = diffHash;
@@ -93,21 +108,25 @@ public class AnalysisRun {
         this.modelName = modelName;
         this.status = status;
         this.errorMessage = errorMessage;
+        this.hallucinatedRefCount = hallucinatedRefCount;
+        this.groundingRate = groundingRate;
     }
 
-    public UUID getId()                  { return id; }
-    public String getPrUrl()             { return prUrl; }
-    public String getSampleId()          { return sampleId; }
-    public String getDiffHash()          { return diffHash; }
-    public boolean isCacheHit()          { return cacheHit; }
-    public long getGithubLatencyMs()     { return githubLatencyMs; }
-    public long getRetrievalLatencyMs()  { return retrievalLatencyMs; }
-    public long getLlmLatencyMs()        { return llmLatencyMs; }
-    public long getTotalLatencyMs()      { return totalLatencyMs; }
-    public int getPromptTokens()         { return promptTokens; }
-    public int getCompletionTokens()     { return completionTokens; }
-    public String getModelName()         { return modelName; }
-    public String getStatus()            { return status; }
-    public String getErrorMessage()      { return errorMessage; }
-    public Instant getCreatedAt()        { return createdAt; }
+    public UUID getId()                      { return id; }
+    public String getPrUrl()                 { return prUrl; }
+    public String getSampleId()              { return sampleId; }
+    public String getDiffHash()              { return diffHash; }
+    public boolean isCacheHit()              { return cacheHit; }
+    public long getGithubLatencyMs()         { return githubLatencyMs; }
+    public long getRetrievalLatencyMs()      { return retrievalLatencyMs; }
+    public long getLlmLatencyMs()            { return llmLatencyMs; }
+    public long getTotalLatencyMs()          { return totalLatencyMs; }
+    public int getPromptTokens()             { return promptTokens; }
+    public int getCompletionTokens()         { return completionTokens; }
+    public String getModelName()             { return modelName; }
+    public String getStatus()                { return status; }
+    public String getErrorMessage()          { return errorMessage; }
+    public Integer getHallucinatedRefCount() { return hallucinatedRefCount; }
+    public Double getGroundingRate()         { return groundingRate; }
+    public Instant getCreatedAt()            { return createdAt; }
 }

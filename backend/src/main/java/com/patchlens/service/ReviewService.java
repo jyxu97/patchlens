@@ -1,5 +1,6 @@
 package com.patchlens.service;
 
+import com.patchlens.dto.GroundingReport;
 import com.patchlens.exception.GitHubApiException;
 import com.patchlens.model.*;
 import com.patchlens.repository.AnalysisRunRepository;
@@ -25,6 +26,7 @@ public class ReviewService {
     private final CacheService cacheService;
     private final ContextIndexingService contextIndexingService;
     private final ContextRetrievalService contextRetrievalService;
+    private final GroundingValidationService groundingValidationService;
     private final ReviewSessionRepository sessionRepository;
     private final AnalysisRunRepository analysisRunRepository;
     private final ObjectMapper objectMapper;
@@ -36,6 +38,7 @@ public class ReviewService {
                          CacheService cacheService,
                          ContextIndexingService contextIndexingService,
                          ContextRetrievalService contextRetrievalService,
+                         GroundingValidationService groundingValidationService,
                          ReviewSessionRepository sessionRepository,
                          AnalysisRunRepository analysisRunRepository,
                          ObjectMapper objectMapper) {
@@ -46,6 +49,7 @@ public class ReviewService {
         this.cacheService = cacheService;
         this.contextIndexingService = contextIndexingService;
         this.contextRetrievalService = contextRetrievalService;
+        this.groundingValidationService = groundingValidationService;
         this.sessionRepository = sessionRepository;
         this.analysisRunRepository = analysisRunRepository;
         this.objectMapper = objectMapper;
@@ -67,7 +71,8 @@ public class ReviewService {
             List<RiskScore> riskScores,
             ReviewResult reviewResult,
             List<RetrievedContextChunk> retrievedContext,
-            UUID reviewSessionId
+            UUID reviewSessionId,
+            GroundingReport groundingReport
     ) {}
 
     /**
@@ -94,7 +99,7 @@ public class ReviewService {
             long totalMs = System.currentTimeMillis() - totalStart;
             analysisRunRepository.save(new AnalysisRun(
                     prUrl, null, diffHash,
-                    true, githubMs, 0, 0, totalMs, 0, 0, "cached", "success", null
+                    true, githubMs, 0, 0, totalMs, 0, 0, "cached", "success", null, null, null
             ));
             CachedAnalysis ca = cached.get();
             return new AnalysisOutcome(
@@ -102,7 +107,7 @@ public class ReviewService {
                     true, false,
                     ca.overallRisk(), ca.riskScores(),
                     ca.reviewResult(), ca.retrievedContext(),
-                    null
+                    null, null
             );
         }
 
@@ -129,6 +134,8 @@ public class ReviewService {
                 openAIService.generateReview(metadata, files, riskScores, contextChunks);
         long llmMs = System.currentTimeMillis() - llmStart;
 
+        GroundingReport groundingReport = groundingValidationService.validate(generated.reviewResult(), files);
+
         long totalMs = System.currentTimeMillis() - totalStart;
 
         cacheService.put(cacheKey, new CachedAnalysis(
@@ -145,7 +152,8 @@ public class ReviewService {
                 prUrl, null, diffHash,
                 false, githubMs, retrievalMs, llmMs, totalMs,
                 generated.promptTokens(), generated.completionTokens(),
-                generated.modelName(), "success", null
+                generated.modelName(), "success", null,
+                groundingReport.hallucinatedCount(), groundingReport.groundingRate()
         ));
 
         return new AnalysisOutcome(
@@ -153,7 +161,7 @@ public class ReviewService {
                 false, indexing,
                 overallRisk, riskScores,
                 generated.reviewResult(), retrieved,
-                session.getId()
+                session.getId(), groundingReport
         );
     }
 
@@ -171,7 +179,7 @@ public class ReviewService {
             long totalMs = System.currentTimeMillis() - totalStart;
             analysisRunRepository.save(new AnalysisRun(
                     null, sampleId, diffHash,
-                    true, 0, 0, 0, totalMs, 0, 0, "cached", "success", null
+                    true, 0, 0, 0, totalMs, 0, 0, "cached", "success", null, null, null
             ));
             CachedAnalysis ca = cached.get();
             return new AnalysisOutcome(
@@ -180,7 +188,7 @@ public class ReviewService {
                     true, false,
                     ca.overallRisk(), ca.riskScores(),
                     ca.reviewResult(), ca.retrievedContext(),
-                    null
+                    null, null
             );
         }
 
@@ -201,6 +209,8 @@ public class ReviewService {
                 openAIService.generateReview(sample.metadata(), sample.files(), riskScores, contextChunks);
         long llmMs = System.currentTimeMillis() - llmStart;
 
+        GroundingReport groundingReport = groundingValidationService.validate(generated.reviewResult(), sample.files());
+
         long totalMs = System.currentTimeMillis() - totalStart;
 
         cacheService.put(cacheKey, new CachedAnalysis(
@@ -218,7 +228,8 @@ public class ReviewService {
                 null, sampleId, diffHash,
                 false, 0, retrievalMs, llmMs, totalMs,
                 generated.promptTokens(), generated.completionTokens(),
-                generated.modelName(), "success", null
+                generated.modelName(), "success", null,
+                groundingReport.hallucinatedCount(), groundingReport.groundingRate()
         ));
 
         return new AnalysisOutcome(
@@ -227,7 +238,7 @@ public class ReviewService {
                 false, false,
                 overallRisk, riskScores,
                 generated.reviewResult(), retrieved,
-                session.getId()
+                session.getId(), groundingReport
         );
     }
 

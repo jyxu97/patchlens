@@ -131,6 +131,9 @@ public class ReviewController {
                         "similarityScore", Math.round(c.similarityScore() * 1000.0) / 1000.0
                 ))
                 .toList());
+        if (outcome.groundingReport() != null) {
+            map.put("groundingReport", outcome.groundingReport());
+        }
         return map;
     }
 
