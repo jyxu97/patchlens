@@ -23,6 +23,6 @@ jobs:
 
       # Run only pure unit tests (no Spring context, no external services needed)
       - name: Run unit tests
-        run: ./mvnw test -Dtest="GitHubPrUrlParserTest,DiffParserServiceTest,RiskScoringServiceTest,SamplePrLoaderTest,CacheServiceTest,OpenAIServiceTest,WebhookSignatureValidatorTest,GroundingValidationServiceTest" -DfailIfNoTests=false
+        run: ./mvnw test -Dtest="GitHubPrUrlParserTest,DiffParserServiceTest,RiskScoringServiceTest,SamplePrLoaderTest,CacheServiceTest,OpenAIServiceTest,WebhookSignatureValidatorTest,GroundingValidationServiceTest,EvalRunnerTest" -DfailIfNoTests=false
         working-directory: backend
 
