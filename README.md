@@ -14,6 +14,9 @@
 - Rule-based risk scoring flags auth, payment, migration, and config changes before calling GPT
 - RAG pipeline retrieves top-k repository context chunks from pgvector; file paths and similarity scores are returned alongside the review so the result is traceable, not a black box
 - Structured GPT output with JSON schema validation produces typed summaries, risky-file annotations, and test checklists
+- Grounding validation checks every AI-flagged file path against the actual PR diff and reports a grounding rate; hallucinated paths are logged per analysis run
+- Prompt/model versioning records the active prompt version tag alongside every analysis run, enabling A/B evaluation when upgrading models or revising prompts
+- Automated eval suite runs the full pipeline against all three built-in sample PRs in CI, asserting structural correctness and minimum expected risk levels without any external services
 - Redis caching by diff hash skips repeated LLM calls when the PR hasn't changed
 - Every analysis run logs GitHub API latency, retrieval latency, LLM latency, token usage, and cache-hit status to PostgreSQL
 - Mock AI mode for local development without spending API credits
@@ -41,9 +44,10 @@ ReviewJobWorker  ──  consumes queue messages
         |-- DiffParserService    normalize diffs, compute SHA-256 hash
         |-- RiskScoringService   score files using deterministic rules
         |-- CacheService         check Redis for existing analysis
-        |-- ContextRetrieval     retrieve top-k chunks from pgvector
-        |-- OpenAIService        generate structured review brief
-        |-- ReviewJobService     update job status (PROCESSING → COMPLETED)
+        |-- ContextRetrieval          retrieve top-k chunks from pgvector
+        |-- OpenAIService             generate structured review brief
+        |-- GroundingValidation       check AI file paths against actual diff
+        |-- ReviewJobService          update job status (PROCESSING → COMPLETED)
         |
         |-- PostgreSQL + pgvector   review jobs, sessions, context chunks
         |-- Redis                   diff-hash result cache
@@ -183,9 +187,12 @@ Every analysis request — cache hit or miss — writes one row to the `analysis
 | `prompt_tokens` | Input tokens consumed by the model |
 | `completion_tokens` | Output tokens consumed by the model |
 | `model_name` | Model used (`gpt-4o-mini`, `mock`, or `cached`) |
+| `hallucinated_ref_count` | Number of AI-flagged file paths not present in the actual diff (null on cache hits) |
+| `grounding_rate` | Fraction of AI-flagged paths that were grounded in the diff (null on cache hits) |
+| `prompt_version_id` | FK to `prompt_versions` — records which prompt + model combination was active |
 | `status` | `success` or `error` |
 
-This makes it straightforward to distinguish whether latency comes from GitHub API fetch, pgvector retrieval, or OpenAI generation — and to verify the cache-hit rate in production.
+This makes it straightforward to distinguish whether latency comes from GitHub API fetch, pgvector retrieval, or OpenAI generation — and to correlate AI output quality with specific prompt versions.
 
 ---
 
@@ -208,6 +215,8 @@ OpenAI is called with `response_format: json_object` and a strict JSON schema. T
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allowed origins | `http://localhost:5173` |
 | `OPENAI_MODEL` | GPT model to use | `gpt-4o-mini` |
 | `GITHUB_WEBHOOK_SECRET` | Secret for HMAC-SHA256 webhook validation | *(empty, skips validation)* |
+| `PROMPT_VERSION` | Version tag written to `prompt_versions` table | `v1` |
+| `PROMPT_NOTES` | Human-readable description of this prompt version | `Initial version with gpt-4o-mini` |
 
 ---
 
