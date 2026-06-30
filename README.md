@@ -2,9 +2,9 @@
 
 **AI-powered pull request review assistant** — summarizes PR diffs, flags risky files, and generates reviewer checklists using GPT and retrieved repository context.
 
-**Live demo:** https://patchlens-alpha.vercel.app
+**Live demo:** https://patchlens-alpha.vercel.app — try the manual analysis flow by pasting any public GitHub PR URL
 
-![PatchLens demo](demo.gif)
+![PatchLens manual analysis demo](demo.gif)
 
 ---
 
@@ -77,13 +77,23 @@ JobStatusEmitter  ──  SSE push to client (PENDING → PROCESSING → COMPLET
 
 ## How It Works
 
-1. User enters a GitHub PR URL (or clicks **Try Sample PR**)
-2. Backend fetches PR metadata and changed files from GitHub API
-3. Computes a SHA-256 hash of the normalized diff — checks Redis cache
-4. On cache miss: runs rule-based risk scoring; if the repo has never been indexed or the index is stale (tree SHA changed), triggers async file discovery — fetches the full repository tree, scores every file by path/name/extension, and embeds the top 50 highest-signal files into pgvector; then retrieves top-k repository context chunks, calls OpenAI with the assembled prompt
-5. Response includes the review brief, per-file risk scores, and retrieved context chunks with file paths and similarity scores
-6. Result is cached in Redis and persisted to PostgreSQL; latency breakdown and token usage are logged to the `analysis_runs` table
-7. Frontend displays the structured review brief and the retrieved context that grounded it
+### Webhook flow (primary)
+
+1. GitHub sends a `pull_request` event (opened / synchronize / reopened) to `POST /api/webhooks/github`
+2. Backend validates the HMAC-SHA256 signature, creates a `ReviewJob` (status: PENDING), and publishes a message to RabbitMQ — responding 202 immediately
+3. `ReviewJobWorker` consumes the message and runs the analysis pipeline:
+   - Fetches PR metadata and changed files from GitHub API
+   - Computes a SHA-256 hash of the normalized diff; checks Redis cache
+   - On cache miss: runs rule-based risk scoring, retrieves top-k repository context chunks from pgvector, calls OpenAI with the assembled prompt, runs grounding validation on AI-flagged file paths
+   - Updates job status to COMPLETED (or FAILED on error)
+4. `JobStatusEmitter` pushes each status transition to the client via SSE (`GET /api/jobs/{id}/stream`)
+5. Result and latency metrics are persisted to PostgreSQL; result is cached in Redis by diff hash
+
+### Manual flow (UI / API)
+
+1. User enters a GitHub PR URL (or clicks **Try Sample PR**) in the web UI
+2. `POST /api/reviews/analyze` runs the same pipeline synchronously and returns the full review brief in one HTTP response
+3. Frontend displays the structured review brief and the retrieved context that grounded it
 
 ---
 
