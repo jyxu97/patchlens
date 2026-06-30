@@ -3,11 +3,13 @@ package com.patchlens.service;
 import com.patchlens.model.JobStatus;
 import com.patchlens.model.ReviewJob;
 import com.patchlens.repository.ReviewJobRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -18,6 +20,10 @@ import java.util.UUID;
 @Service
 public class ReviewJobService {
 
+    // Self-reference via Spring proxy so @Transactional(REQUIRES_NEW) on tryInsertJob works
+    @Autowired
+    private ReviewJobService self;
+
     private final ReviewJobRepository repository;
     private final JobStatusEmitter emitter;
 
@@ -27,24 +33,51 @@ public class ReviewJobService {
     }
 
     /**
-     * Creates a new PENDING job.
-     * Checks for an existing PENDING/PROCESSING job for the same PR first (idempotency).
+     * Returns an existing job for this PR commit, or creates a new PENDING one.
      *
-     * @return existing job if one is already active, otherwise newly created job
+     * <p>Concurrency-safe: {@code tryInsertJob()} runs in its own REQUIRES_NEW transaction
+     * so its commit/rollback is isolated from the caller's transaction.  If a concurrent
+     * request already inserted the same (owner, repo, pullNumber, headSha), the unique
+     * constraint triggers a {@link DataIntegrityViolationException}, which is caught here;
+     * the loser thread then re-queries and returns the winner's job.  Exactly one job row
+     * is created regardless of how many concurrent duplicate webhooks arrive.
+     *
+     * @param headSha  commit SHA from pull_request.head.sha in the webhook payload
+     * @return the deduplicated job for this PR commit
      */
     @Transactional
-    public ReviewJob createOrFind(String owner, String repo, int pullNumber, String pullRequestUrl) {
+    public ReviewJob createOrFind(String owner, String repo, int pullNumber,
+                                  String pullRequestUrl, String headSha) {
         Optional<ReviewJob> existing = repository
-                .findFirstByRepositoryOwnerAndRepositoryNameAndPullRequestNumberAndStatusIn(
-                        owner, repo, pullNumber,
-                        List.of(JobStatus.PENDING, JobStatus.PROCESSING)
-                );
+                .findFirstByRepositoryOwnerAndRepositoryNameAndPullRequestNumberAndHeadSha(
+                        owner, repo, pullNumber, headSha);
         if (existing.isPresent()) {
             return existing.get();
         }
 
-        ReviewJob job = new ReviewJob(owner, repo, pullNumber, pullRequestUrl);
-        ReviewJob saved = repository.save(job);
+        try {
+            return self.tryInsertJob(owner, repo, pullNumber, pullRequestUrl, headSha);
+        } catch (DataIntegrityViolationException e) {
+            // A concurrent request won the insert race — find and return the winning job
+            return repository
+                    .findFirstByRepositoryOwnerAndRepositoryNameAndPullRequestNumberAndHeadSha(
+                            owner, repo, pullNumber, headSha)
+                    .orElseThrow(() -> new IllegalStateException(
+                            "Concurrent insert conflict but job not found", e));
+        }
+    }
+
+    /**
+     * Inserts a new PENDING job in its own REQUIRES_NEW transaction.
+     * Must be called via the Spring proxy (i.e. {@code self.tryInsertJob(...)}) so
+     * that the transaction is independent — a rollback here does not mark the
+     * caller's transaction as rollback-only.
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public ReviewJob tryInsertJob(String owner, String repo, int pullNumber,
+                                  String pullRequestUrl, String headSha) {
+        ReviewJob job = new ReviewJob(owner, repo, pullNumber, pullRequestUrl, headSha);
+        ReviewJob saved = repository.saveAndFlush(job); // flush immediately to surface constraint violation
         emitter.emit(saved);
         return saved;
     }

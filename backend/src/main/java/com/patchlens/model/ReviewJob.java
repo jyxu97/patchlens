@@ -10,6 +10,12 @@ import java.util.UUID;
     indexes = {
         @Index(name = "idx_review_jobs_owner_repo_pr",
                columnList = "repository_owner, repository_name, pull_request_number")
+    },
+    uniqueConstraints = {
+        @UniqueConstraint(
+            name = "uq_review_jobs_pr_head_sha",
+            columnNames = {"repository_owner", "repository_name", "pull_request_number", "head_sha"}
+        )
     }
 )
 public class ReviewJob {
@@ -29,6 +35,14 @@ public class ReviewJob {
 
     @Column(name = "pull_request_url", nullable = false)
     private String pullRequestUrl;
+
+    /**
+     * GitHub commit SHA from pull_request.head.sha in the webhook payload.
+     * Used as the idempotency key — same PR + same commit = same review job.
+     * Part of the unique constraint uq_review_jobs_pr_head_sha.
+     */
+    @Column(name = "head_sha", length = 40)
+    private String headSha;
 
     @Column(name = "diff_hash")
     private String diffHash;
@@ -72,11 +86,12 @@ public class ReviewJob {
     public ReviewJob() {}
 
     public ReviewJob(String repositoryOwner, String repositoryName,
-                     int pullRequestNumber, String pullRequestUrl) {
+                     int pullRequestNumber, String pullRequestUrl, String headSha) {
         this.repositoryOwner = repositoryOwner;
         this.repositoryName = repositoryName;
         this.pullRequestNumber = pullRequestNumber;
         this.pullRequestUrl = pullRequestUrl;
+        this.headSha = headSha;
         this.status = JobStatus.PENDING;
     }
 
@@ -85,6 +100,7 @@ public class ReviewJob {
     public String getRepositoryName() { return repositoryName; }
     public int getPullRequestNumber() { return pullRequestNumber; }
     public String getPullRequestUrl() { return pullRequestUrl; }
+    public String getHeadSha() { return headSha; }
     public String getDiffHash() { return diffHash; }
     public JobStatus getStatus() { return status; }
     public String getResultJson() { return resultJson; }

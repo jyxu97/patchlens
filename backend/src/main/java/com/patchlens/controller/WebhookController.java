@@ -81,9 +81,12 @@ public class WebhookController {
         String repo = webhookPayload.repository().name();
         int pullNumber = webhookPayload.pullRequest().number();
         String prUrl = webhookPayload.pullRequest().htmlUrl();
+        // head.sha uniquely identifies the commit; used as the idempotency key
+        String headSha = webhookPayload.pullRequest().head() != null
+                ? webhookPayload.pullRequest().head().sha() : "unknown";
 
-        // Idempotency: reuse existing PENDING/PROCESSING job for the same PR
-        ReviewJob job = reviewJobService.createOrFind(owner, repo, pullNumber, prUrl);
+        // Idempotency: reuse existing job for the same PR commit (concurrent-safe)
+        ReviewJob job = reviewJobService.createOrFind(owner, repo, pullNumber, prUrl, headSha);
 
         // Publish message to RabbitMQ (only if job is still PENDING — don't re-queue PROCESSING jobs)
         switch (job.getStatus()) {

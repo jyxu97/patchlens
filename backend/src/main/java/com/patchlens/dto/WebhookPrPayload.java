@@ -17,8 +17,12 @@ public record WebhookPrPayload(
     public record PullRequest(
             int number,
             @JsonProperty("html_url") String htmlUrl,
-            String title
+            String title,
+            Head head
     ) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Head(String sha) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Repository(

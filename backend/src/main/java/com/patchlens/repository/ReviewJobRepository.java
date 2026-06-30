@@ -16,4 +16,11 @@ public interface ReviewJobRepository extends JpaRepository<ReviewJob, UUID> {
             int pullRequestNumber,
             List<JobStatus> statuses
     );
+
+    Optional<ReviewJob> findFirstByRepositoryOwnerAndRepositoryNameAndPullRequestNumberAndHeadSha(
+            String repositoryOwner,
+            String repositoryName,
+            int pullRequestNumber,
+            String headSha
+    );
 }
