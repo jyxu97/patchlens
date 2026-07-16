@@ -70,12 +70,12 @@ class ReviewJobDeduplicationTest {
     // ── sequential ───────────────────────────────────────────────────────────
 
     /**
-     * 50 sequential calls for the same (owner, repo, PR, head SHA) must create
-     * exactly 1 job.  Calls 2-50 find the existing PENDING job and return it.
+     * 300 sequential calls for the same (owner, repo, PR, head SHA) must create
+     * exactly 1 job.  Calls 2-300 find the existing PENDING job and return it.
      */
     @Test
-    void sequential_50_duplicateWebhooks_createsSingleJob() {
-        for (int i = 0; i < 50; i++) {
+    void sequential_300_duplicateWebhooks_createsSingleJob() {
+        for (int i = 0; i < 300; i++) {
             ReviewJob job = service.createOrFind(OWNER, REPO, PR_NUM, PR_URL, HEAD_SHA);
             assertThat(job).isNotNull();
         }
@@ -85,12 +85,12 @@ class ReviewJobDeduplicationTest {
     // ── concurrent ───────────────────────────────────────────────────────────
 
     /**
-     * 50 concurrent threads released simultaneously (CountDownLatch) for the
+     * 250 concurrent threads released simultaneously (CountDownLatch) for the
      * same (owner, repo, PR, head SHA) must create exactly 1 job.
      *
      * <p>The unique DB constraint ensures only one INSERT wins.  The loser
      * threads catch DataIntegrityViolationException inside
-     * {@code createOrFind()} and re-query, so all 50 calls complete without
+     * {@code createOrFind()} and re-query, so all 250 calls complete without
      * throwing to the caller and all receive the same job ID.
      *
      * <p>{@code NOT_SUPPORTED} disables the outer test transaction so spawned
@@ -98,8 +98,8 @@ class ReviewJobDeduplicationTest {
      */
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void concurrent_50_duplicateWebhooks_createsSingleJob() throws InterruptedException {
-        int n = 50;
+    void concurrent_250_duplicateWebhooks_createsSingleJob() throws InterruptedException {
+        int n = 250;
         CountDownLatch ready   = new CountDownLatch(n);
         CountDownLatch start   = new CountDownLatch(1);
         CountDownLatch done    = new CountDownLatch(n);
@@ -123,13 +123,13 @@ class ReviewJobDeduplicationTest {
         }
 
         ready.await();
-        start.countDown();              // release all 50 simultaneously
-        boolean completed = done.await(10, TimeUnit.SECONDS);
+        start.countDown();              // release all 250 simultaneously
+        boolean completed = done.await(30, TimeUnit.SECONDS);
         pool.shutdown();
 
-        assertThat(completed).as("all threads finish within 10 s").isTrue();
+        assertThat(completed).as("all threads finish within 30 s").isTrue();
         assertThat(errors.get()).as("no exceptions propagate to callers").isEqualTo(0);
-        assertThat(returned).as("all 50 calls return a job").hasSize(n);
+        assertThat(returned).as("all 250 calls return a job").hasSize(n);
 
         long distinctIds = returned.stream().map(ReviewJob::getId).distinct().count();
         assertThat(distinctIds).as("all callers receive the same job").isEqualTo(1);
