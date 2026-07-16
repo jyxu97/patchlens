@@ -61,6 +61,7 @@ async def update_status(
     job_id: int,
     status: str,
     result: dict | None = None,
+    grounding_report: dict | None = None,
     error_message: str | None = None,
 ) -> None:
     job = await session.get(ReviewJob, job_id)
@@ -69,6 +70,8 @@ async def update_status(
     job.status = status
     if result is not None:
         job.result = json.dumps(result)
+    if grounding_report is not None:
+        job.grounding_report = json.dumps(grounding_report)
     if error_message is not None:
         job.error_message = error_message
     await session.commit()

@@ -28,12 +28,14 @@ JSON object with exactly this schema:
   "risk_assessment": {
     "overall_risk": "<LOW|MEDIUM|HIGH|CRITICAL>",
     "risk_factors": ["<string>", ...],
-    "risk_score": <float 0-10>
+    "risk_score": <float 0-10>,
+    "risky_files": ["<exact file path from the diff>", ...]
   },
   "suggested_tests": ["<string>", ...],
   "review_checklist": ["<string>", ...]
 }
-Return only valid JSON, no markdown fences.
+For risky_files, list ONLY exact file paths that appear in the diff (e.g. "src/auth/login.py").
+Do not invent file paths. Return only valid JSON, no markdown fences.
 """
 
 

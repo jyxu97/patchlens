@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.review_job import ReviewJob
-from app.schemas.review import JobResponse, ReviewResult
+from app.schemas.review import GroundingReport, JobResponse, ReviewResult
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
@@ -20,6 +20,10 @@ async def get_job(job_id: int, db: AsyncSession = Depends(get_db)) -> JobRespons
     if job.result:
         result = ReviewResult.model_validate(json.loads(job.result))
 
+    grounding_report = None
+    if job.grounding_report:
+        grounding_report = GroundingReport.model_validate(json.loads(job.grounding_report))
+
     return JobResponse(
         id=job.id,
         owner=job.owner,
@@ -29,5 +33,6 @@ async def get_job(job_id: int, db: AsyncSession = Depends(get_db)) -> JobRespons
         head_sha=job.head_sha,
         status=job.status,
         result=result,
+        grounding_report=grounding_report,
         error_message=job.error_message,
     )

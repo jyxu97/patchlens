@@ -23,6 +23,7 @@ class ReviewJob(Base):
     head_sha: Mapped[str] = mapped_column(String(40), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING")
     result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    grounding_report: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
