@@ -12,11 +12,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 
-_client = AsyncOpenAI(api_key=settings.openai_api_key)
+_client: AsyncOpenAI | None = None
+
+
+def _get_client() -> AsyncOpenAI:
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(api_key=settings.openai_api_key)
+    return _client
 
 
 async def embed(text_content: str) -> list[float]:
-    resp = await _client.embeddings.create(model=settings.embedding_model, input=text_content)
+    resp = await _get_client().embeddings.create(model=settings.embedding_model, input=text_content)
     return resp.data[0].embedding
 
 

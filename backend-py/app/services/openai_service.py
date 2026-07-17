@@ -7,6 +7,7 @@ Key differentiator: `ReviewResult.model_validate(data)` raises a structured
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 from pydantic import ValidationError
@@ -14,7 +15,14 @@ from pydantic import ValidationError
 from app.config import settings
 from app.schemas.review import ReviewResult
 
-_client = AsyncOpenAI(api_key=settings.openai_api_key)
+_client: AsyncOpenAI | None = None
+
+
+def _get_client() -> AsyncOpenAI:
+    global _client
+    if _client is None:
+        _client = AsyncOpenAI(api_key=settings.openai_api_key)
+    return _client
 
 SYSTEM_PROMPT = """\
 You are an expert code reviewer. Analyze the provided pull request diff and return a
@@ -39,12 +47,20 @@ Do not invent file paths. Return only valid JSON, no markdown fences.
 """
 
 
+@dataclass
+class AnalyzeResult:
+    review: ReviewResult
+    prompt_tokens: int
+    completion_tokens: int
+    model_name: str
+
+
 async def analyze(
     diff: str,
     risk_score: float,
     risk_factors: list[str],
     rag_context: list[str],
-) -> ReviewResult:
+) -> AnalyzeResult:
     context_block = "\n".join(rag_context) if rag_context else "No prior context available."
     user_content = (
         f"Risk score: {risk_score}/10\n"
@@ -53,7 +69,7 @@ async def analyze(
         f"Diff:\n{diff[:12_000]}"  # guard against token overflow
     )
 
-    response = await _client.chat.completions.create(
+    response = await _get_client().chat.completions.create(
         model=settings.openai_model,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -68,8 +84,14 @@ async def analyze(
 
     # Pydantic v2 structural validation – raises ValidationError on bad schema.
     try:
-        result = ReviewResult.model_validate(data)
+        review = ReviewResult.model_validate(data)
     except ValidationError as exc:
         raise ValueError(f"OpenAI returned invalid schema: {exc}") from exc
 
-    return result
+    usage = response.usage
+    return AnalyzeResult(
+        review=review,
+        prompt_tokens=usage.prompt_tokens if usage else 0,
+        completion_tokens=usage.completion_tokens if usage else 0,
+        model_name=response.model,
+    )

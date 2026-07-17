@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.database import Base, get_engine
-from app.routers import jobs, webhooks
+from app.routers import jobs, metrics, webhooks
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -47,6 +47,7 @@ app = FastAPI(title="PatchLens", version="1.0.0", lifespan=lifespan)
 
 app.include_router(webhooks.router)
 app.include_router(jobs.router)
+app.include_router(metrics.router)
 
 
 @app.get("/health")
