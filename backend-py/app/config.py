@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     cache_ttl_github_pr: int = 86_400   # 24 hours
     cache_ttl_sample_pr: int = 604_800  # 7 days
 
+    # Prompt versioning — bump tag whenever the system prompt changes
+    prompt_version_tag: str = "v1.0.0"
+    prompt_version_notes: str = "Structured review with grounding validation and risky_files field"
+
     # GitHub
     github_token: str = ""
     github_webhook_secret: str = ""

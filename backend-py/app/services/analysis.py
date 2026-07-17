@@ -7,6 +7,7 @@ import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.main as _app_state
 from app.config import settings
 from app.models.analysis_run import AnalysisRun
 from app.schemas.review import GroundingReport, ReviewResult
@@ -71,6 +72,7 @@ async def run_analysis(
                 prompt_tokens=None, completion_tokens=None, model_name=None,
                 hallucinated_ref_count=grounding.hallucinated_count,
                 grounding_rate=grounding.grounding_rate,
+                prompt_version_id=_app_state.current_prompt_version_id,
             )
             session.add(run)
             await session.commit()
@@ -137,6 +139,7 @@ async def run_analysis(
             model_name=analyze_result.model_name,
             hallucinated_ref_count=grounding.hallucinated_count,
             grounding_rate=grounding.grounding_rate,
+            prompt_version_id=_app_state.current_prompt_version_id,
         )
         session.add(run)
         await session.commit()

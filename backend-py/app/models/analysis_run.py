@@ -44,6 +44,9 @@ class AnalysisRun(Base):
     completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     model_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
+    # Prompt version FK (nullable — older rows pre-date versioning)
+    prompt_version_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     # Grounding
     hallucinated_ref_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     grounding_rate: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)

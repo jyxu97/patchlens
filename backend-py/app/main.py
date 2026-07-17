@@ -8,23 +8,31 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.database import Base, get_engine
+from app.database import Base, get_engine, get_session_factory
 from app.routers import jobs, metrics, webhooks
 from app.services import cache as cache_service
+from app.services import prompt_version as prompt_version_service
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
 _consumer_task: asyncio.Task | None = None
+current_prompt_version_id: int | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global current_prompt_version_id
+
     engine = get_engine()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
-    global _consumer_task
+    # Register the current prompt version on startup (idempotent)
+    async with get_session_factory()() as session:
+        pv = await prompt_version_service.get_or_create(session)
+        current_prompt_version_id = pv.id
+
     try:
         from app.worker.consumer import start_consumer
 
