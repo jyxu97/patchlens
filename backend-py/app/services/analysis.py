@@ -1,4 +1,4 @@
-"""End-to-end analysis pipeline: GitHub → diff → risk → RAG → OpenAI → grounding → persist."""
+"""End-to-end analysis pipeline: GitHub → diff → cache check → risk → RAG → OpenAI → grounding → persist."""
 
 from __future__ import annotations
 
@@ -7,9 +7,12 @@ import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.analysis_run import AnalysisRun
 from app.schemas.review import GroundingReport, ReviewResult
+from app.services import cache as cache_service
 from app.services import review_job as review_job_service
+from app.services.cache import review_key
 from app.services.context import retrieve_context
 from app.services.diff_parser import overall_hash, parse_diff
 from app.services.github import fetch_pr_metadata
@@ -40,19 +43,48 @@ async def run_analysis(
         pr = await fetch_pr_metadata(owner, repo, pull_number)
         github_latency_ms = _ms(t0)
 
-        # 2. Parse diff + compute content hash
+        # 2. Parse diff + compute stable content hash
         file_diffs = parse_diff(pr.diff)
         diff_hash = overall_hash(file_diffs)
 
-        # 3. Rule-based risk scoring
+        # 3. Cache check — hit skips RAG + OpenAI entirely
+        cache_key = review_key(owner, repo, pull_number, diff_hash)
+        cached = await cache_service.get(cache_key)
+
+        if cached:
+            log.info("Cache HIT for job %d (key=%s)", job_id, cache_key)
+            result = ReviewResult.model_validate(cached["result"])
+            grounding = GroundingReport.model_validate(cached["grounding_report"])
+
+            await review_job_service.update_status(
+                session, job_id, "COMPLETED",
+                result=result.model_dump(),
+                grounding_report=grounding.model_dump(),
+            )
+            run = AnalysisRun(
+                owner=owner, repo=repo, pull_number=pull_number,
+                pr_url=f"https://github.com/{owner}/{repo}/pull/{pull_number}",
+                diff_hash=diff_hash, cache_hit=True,
+                github_latency_ms=github_latency_ms,
+                retrieval_latency_ms=None, llm_latency_ms=None,
+                total_latency_ms=_ms(total_start),
+                prompt_tokens=None, completion_tokens=None, model_name=None,
+                hallucinated_ref_count=grounding.hallucinated_count,
+                grounding_rate=grounding.grounding_rate,
+            )
+            session.add(run)
+            await session.commit()
+            return
+
+        # 4. Cache MISS — rule-based risk scoring
         risk_score, risk_factors = score_pr(file_diffs)
 
-        # 4. pgvector RAG context retrieval
+        # 5. pgvector RAG context retrieval
         t0 = time.monotonic()
         rag_snippets = await retrieve_context(session, pr.diff[:2000])
         retrieval_latency_ms = _ms(t0)
 
-        # 5. OpenAI call + Pydantic v2 structural validation
+        # 6. OpenAI call + Pydantic v2 structural validation
         t0 = time.monotonic()
         analyze_result = await analyze(
             diff=pr.diff,
@@ -63,7 +95,7 @@ async def run_analysis(
         llm_latency_ms = _ms(t0)
         result: ReviewResult = analyze_result.review
 
-        # 6. Grounding validation — detect hallucinated file paths
+        # 7. Grounding validation — detect hallucinated file paths
         grounding: GroundingReport = grounding_validate(
             risky_files=result.risk_assessment.risky_files,
             changed_files=pr.changed_files,
@@ -71,31 +103,31 @@ async def run_analysis(
         if grounding.hallucinated_count > 0:
             log.warning(
                 "Job %d: LLM hallucinated %d/%d file paths: %s",
-                job_id,
-                grounding.hallucinated_count,
-                grounding.total_risky_files,
-                grounding.hallucinated_paths,
+                job_id, grounding.hallucinated_count,
+                grounding.total_risky_files, grounding.hallucinated_paths,
             )
 
         total_latency_ms = _ms(total_start)
 
-        # 7. Persist job result
+        # 8. Persist job result
         await review_job_service.update_status(
-            session,
-            job_id,
-            "COMPLETED",
+            session, job_id, "COMPLETED",
             result=result.model_dump(),
             grounding_report=grounding.model_dump(),
         )
 
-        # 8. Write observability record
+        # 9. Store in Redis cache (24h TTL)
+        await cache_service.put(
+            cache_key,
+            {"result": result.model_dump(), "grounding_report": grounding.model_dump()},
+            ttl=settings.cache_ttl_github_pr,
+        )
+
+        # 10. Write observability record
         run = AnalysisRun(
-            owner=owner,
-            repo=repo,
-            pull_number=pull_number,
-            pr_url=pr.diff[:0] or f"https://github.com/{owner}/{repo}/pull/{pull_number}",
-            diff_hash=diff_hash,
-            cache_hit=False,
+            owner=owner, repo=repo, pull_number=pull_number,
+            pr_url=f"https://github.com/{owner}/{repo}/pull/{pull_number}",
+            diff_hash=diff_hash, cache_hit=False,
             github_latency_ms=github_latency_ms,
             retrieval_latency_ms=retrieval_latency_ms,
             llm_latency_ms=llm_latency_ms,

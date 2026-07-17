@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from app.database import Base, get_engine
 from app.routers import jobs, metrics, webhooks
+from app.services import cache as cache_service
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI):
             await _consumer_task
         except asyncio.CancelledError:
             pass
+    await cache_service.close()
     await engine.dispose()
 
 

@@ -10,6 +10,11 @@ class Settings(BaseSettings):
     # RabbitMQ
     rabbitmq_url: str = "amqp://guest:guest@localhost:5672/"
 
+    # Redis
+    redis_url: str = "redis://localhost:6379/0"
+    cache_ttl_github_pr: int = 86_400   # 24 hours
+    cache_ttl_sample_pr: int = 604_800  # 7 days
+
     # GitHub
     github_token: str = ""
     github_webhook_secret: str = ""
