@@ -5,8 +5,11 @@ import com.patchlens.dto.ReviewJobMessage;
 import com.patchlens.dto.WebhookPrPayload;
 import com.patchlens.model.ReviewJob;
 import com.patchlens.service.ReviewJobService;
+import com.patchlens.service.WebhookDeduplicationService;
 import com.patchlens.service.WebhookSignatureValidator;
 import jakarta.servlet.http.HttpServletRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -26,19 +29,24 @@ import java.util.Set;
 @RequestMapping("/api/webhooks")
 public class WebhookController {
 
+    private static final Logger log = LoggerFactory.getLogger(WebhookController.class);
+
     // Only these actions trigger an analysis
     private static final Set<String> ANALYZED_ACTIONS = Set.of("opened", "synchronize", "reopened");
 
     private final WebhookSignatureValidator signatureValidator;
+    private final WebhookDeduplicationService deduplicationService;
     private final ReviewJobService reviewJobService;
     private final RabbitTemplate rabbitTemplate;
     private final ObjectMapper objectMapper;
 
     public WebhookController(WebhookSignatureValidator signatureValidator,
+                             WebhookDeduplicationService deduplicationService,
                              ReviewJobService reviewJobService,
                              RabbitTemplate rabbitTemplate,
                              ObjectMapper objectMapper) {
         this.signatureValidator = signatureValidator;
+        this.deduplicationService = deduplicationService;
         this.reviewJobService = reviewJobService;
         this.rabbitTemplate = rabbitTemplate;
         this.objectMapper = objectMapper;
@@ -84,6 +92,17 @@ public class WebhookController {
         // head.sha uniquely identifies the commit; used as the idempotency key
         String headSha = webhookPayload.pullRequest().head() != null
                 ? webhookPayload.pullRequest().head().sha() : "unknown";
+
+        // Primary dedup gate: Redis SET NX (atomic, 24 h TTL).
+        // Falls open if Redis is unavailable; DB unique constraint is the safety net.
+        if (!deduplicationService.claim(owner, repo, pullNumber, headSha)) {
+            log.info("Duplicate webhook suppressed for {}/{} PR#{} sha={}",
+                    owner, repo, pullNumber, headSha);
+            return ResponseEntity.accepted().body(Map.of(
+                    "status", "accepted",
+                    "duplicate", true
+            ));
+        }
 
         // Idempotency: reuse existing job for the same PR commit (concurrent-safe)
         ReviewJob job = reviewJobService.createOrFind(owner, repo, pullNumber, prUrl, headSha);
