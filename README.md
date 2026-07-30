@@ -2,8 +2,6 @@
 
 **AI-powered pull request review assistant** — summarizes PR diffs, flags risky files, and generates reviewer checklists using GPT and retrieved repository context.
 
-**Live demo:** https://patchlens-alpha.vercel.app — try the manual analysis flow by pasting any public GitHub PR URL
-
 ![PatchLens manual analysis demo](demo.gif)
 
 ---
@@ -17,6 +15,7 @@
 - Grounding validation checks every AI-flagged file path against the actual PR diff and reports a grounding rate; hallucinated paths are logged per analysis run
 - Prompt/model versioning records the active prompt version tag alongside every analysis run, enabling A/B evaluation when upgrading models or revising prompts
 - Automated eval suite runs the full pipeline against all three built-in sample PRs in CI, asserting structural correctness and minimum expected risk levels without any external services
+- Redis SET NX atomic deduplication suppresses duplicate and retried webhook deliveries before any DB write; the unique DB constraint acts as a safety net when Redis is unavailable
 - Redis caching by diff hash skips repeated LLM calls when the PR hasn't changed
 - Every analysis run logs GitHub API latency, retrieval latency, LLM latency, token usage, and cache-hit status to PostgreSQL
 - Mock AI mode for local development without spending API credits
@@ -31,7 +30,8 @@ GitHub Webhook (PR opened/updated)
         v
 Spring Boot API  ──  WebhookController (POST /api/webhooks/github)
         |                validates HMAC-SHA256 signature
-        |                creates ReviewJob (PENDING), idempotency check
+        |                Redis SET NX dedup gate (24 h TTL) ── duplicate? → 202 silently
+        |                creates ReviewJob (PENDING)
         |
         v
 RabbitMQ  ──  review.jobs queue
@@ -80,7 +80,7 @@ JobStatusEmitter  ──  SSE push to client (PENDING → PROCESSING → COMPLET
 ### Webhook flow (primary)
 
 1. GitHub sends a `pull_request` event (opened / synchronize / reopened) to `POST /api/webhooks/github`
-2. Backend validates the HMAC-SHA256 signature, creates a `ReviewJob` (status: PENDING), and publishes a message to RabbitMQ — responding 202 immediately
+2. Backend validates the HMAC-SHA256 signature, then calls Redis `SET NX` with a 24-hour TTL as an atomic dedup gate — duplicate or retried deliveries are suppressed immediately with a 202 before any DB write. On Redis failure the gate fails open and the DB unique constraint acts as a safety net. On the first delivery, a `ReviewJob` (status: PENDING) is created and a message is published to RabbitMQ.
 3. `ReviewJobWorker` consumes the message and runs the analysis pipeline:
    - Fetches PR metadata and changed files from GitHub API
    - Computes a SHA-256 hash of the normalized diff; checks Redis cache
