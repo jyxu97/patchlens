@@ -11,7 +11,7 @@
 - Analyze any public GitHub PR by URL, or try one of three built-in sample PRs without a GitHub token
 - Rule-based risk scoring flags auth, payment, migration, and config changes before calling GPT
 - RAG pipeline retrieves top-k repository context chunks from pgvector; file paths and similarity scores are returned alongside the review so the result is traceable, not a black box
-- Structured GPT output with JSON schema validation produces typed summaries, risky-file annotations, and test checklists
+- Structured GPT output with typed output validation produces typed summaries, risky-file annotations, and test checklists
 - Grounding validation checks every AI-flagged file path against the actual PR diff and reports a grounding rate; hallucinated paths are logged per analysis run
 - Prompt/model versioning records the active prompt version tag alongside every analysis run, enabling A/B evaluation when upgrading models or revising prompts
 - Automated eval suite runs the full pipeline against all three built-in sample PRs in CI, asserting structural correctness and minimum expected risk levels without any external services
