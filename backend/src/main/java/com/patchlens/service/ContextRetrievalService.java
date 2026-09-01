@@ -33,7 +33,21 @@ public class ContextRetrievalService {
     public List<RetrievedContextChunk> retrieve(PullRequestMetadata metadata,
                                                 List<ChangedFile> files,
                                                 List<RiskScore> riskScores) {
-        String query = buildQuery(metadata, files, riskScores);
+        return retrieve(metadata, files, riskScores, List.of());
+    }
+
+    /**
+     * Retrieves the top-k most relevant context chunks, augmented with
+     * retrieval queries from diff understanding (Phase 2).
+     *
+     * @param additionalQueries queries extracted from DiffUnderstanding.retrievalQueries()
+     * @return chunks with file path, full content, and similarity score
+     */
+    public List<RetrievedContextChunk> retrieve(PullRequestMetadata metadata,
+                                                List<ChangedFile> files,
+                                                List<RiskScore> riskScores,
+                                                List<String> additionalQueries) {
+        String query = buildQuery(metadata, files, riskScores, additionalQueries);
         float[] queryEmbedding = embeddingService.embed(query);
         String queryVector = embeddingService.toVectorString(queryEmbedding);
 
@@ -48,13 +62,10 @@ public class ContextRetrievalService {
                 .toList();
     }
 
-    /**
-     * Builds a natural-language query string that captures the intent of the PR.
-     * The more specific the query, the more relevant the retrieved chunks will be.
-     */
-    private String buildQuery(PullRequestMetadata metadata,
-                               List<ChangedFile> files,
-                               List<RiskScore> riskScores) {
+    String buildQuery(PullRequestMetadata metadata,
+                      List<ChangedFile> files,
+                      List<RiskScore> riskScores,
+                      List<String> additionalQueries) {
         StringBuilder sb = new StringBuilder();
         sb.append(metadata.title()).append(". ");
 
@@ -71,6 +82,11 @@ public class ContextRetrievalService {
                 .filter(rs -> rs.riskLevel() != RiskScore.RiskLevel.low)
                 .limit(3)
                 .forEach(rs -> sb.append(rs.filename()).append(" "));
+
+        // Append any additional queries from diff understanding (Phase 2)
+        additionalQueries.stream()
+                .limit(3)
+                .forEach(q -> sb.append(q).append(" "));
 
         return sb.toString().strip();
     }

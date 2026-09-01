@@ -96,13 +96,58 @@ public class ReviewJobService {
     }
 
     /**
+     * Transitions the job to GENERATING_FINDINGS (Phase 2 multi-step pipeline).
+     */
+    @Transactional
+    public ReviewJob markGeneratingFindings(UUID jobId) {
+        ReviewJob job = findOrThrow(jobId);
+        job.setStatus(JobStatus.GENERATING_FINDINGS);
+        ReviewJob saved = repository.save(job);
+        emitter.emit(saved);
+        return saved;
+    }
+
+    /**
+     * Transitions the job to GENERATING_PATCHES (Phase 3).
+     */
+    @Transactional
+    public ReviewJob markGeneratingPatches(UUID jobId) {
+        ReviewJob job = findOrThrow(jobId);
+        job.setStatus(JobStatus.GENERATING_PATCHES);
+        ReviewJob saved = repository.save(job);
+        emitter.emit(saved);
+        return saved;
+    }
+
+    /**
+     * Transitions the job to VALIDATING_PATCHES (Phase 4).
+     */
+    @Transactional
+    public ReviewJob markValidatingPatches(UUID jobId) {
+        ReviewJob job = findOrThrow(jobId);
+        job.setStatus(JobStatus.VALIDATING_PATCHES);
+        ReviewJob saved = repository.save(job);
+        emitter.emit(saved);
+        return saved;
+    }
+
+    /**
      * Transitions the job to COMPLETED and stores the result JSON.
      */
     @Transactional
     public ReviewJob markCompleted(UUID jobId, String diffHash, String resultJson) {
+        return markCompleted(jobId, diffHash, resultJson, 0);
+    }
+
+    /**
+     * Transitions the job to COMPLETED with finding count.
+     */
+    @Transactional
+    public ReviewJob markCompleted(UUID jobId, String diffHash, String resultJson, int findingCount) {
         ReviewJob job = findOrThrow(jobId);
         job.setDiffHash(diffHash);
         job.setResultJson(resultJson);
+        job.setFindingCount(findingCount);
         job.setStatus(JobStatus.COMPLETED);
         job.setCompletedAt(Instant.now());
         ReviewJob saved = repository.save(job);

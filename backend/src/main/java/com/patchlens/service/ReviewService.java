@@ -4,6 +4,7 @@ import com.patchlens.dto.GroundingReport;
 import com.patchlens.exception.GitHubApiException;
 import com.patchlens.model.*;
 import com.patchlens.repository.AnalysisRunRepository;
+import com.patchlens.repository.ReviewFindingRepository;
 import com.patchlens.repository.ReviewSessionRepository;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.ObjectMapper;
@@ -30,6 +31,8 @@ public class ReviewService {
     private final PromptVersionService promptVersionService;
     private final ReviewSessionRepository sessionRepository;
     private final AnalysisRunRepository analysisRunRepository;
+    private final ReviewFindingRepository findingRepository;
+    private final IssueDetectionService issueDetectionService;
     private final ObjectMapper objectMapper;
 
     public ReviewService(GitHubService gitHubService,
@@ -43,6 +46,8 @@ public class ReviewService {
                          PromptVersionService promptVersionService,
                          ReviewSessionRepository sessionRepository,
                          AnalysisRunRepository analysisRunRepository,
+                         ReviewFindingRepository findingRepository,
+                         IssueDetectionService issueDetectionService,
                          ObjectMapper objectMapper) {
         this.gitHubService = gitHubService;
         this.diffParserService = diffParserService;
@@ -55,8 +60,18 @@ public class ReviewService {
         this.promptVersionService = promptVersionService;
         this.sessionRepository = sessionRepository;
         this.analysisRunRepository = analysisRunRepository;
+        this.findingRepository = findingRepository;
+        this.issueDetectionService = issueDetectionService;
         this.objectMapper = objectMapper;
     }
+
+    /**
+     * Result returned by runAnalysisV2 — extends AnalysisOutcome with multi-step findings.
+     */
+    public record AnalysisOutcomeV2(
+            AnalysisOutcome base,
+            List<ReviewFinding> findings
+    ) {}
 
     /**
      * Result returned by runAnalysis — carries all fields needed by
@@ -251,6 +266,31 @@ public class ReviewService {
                 generated.reviewResult(), retrieved,
                 session.getId(), groundingReport
         );
+    }
+
+    /**
+     * V2 pipeline: runs the standard analysis THEN the multi-step issue detection.
+     * Used by ReviewJobWorker for webhook-triggered jobs.
+     * runAnalysis() is preserved for sample PRs and the HTTP endpoint.
+     *
+     * @param jobId the ReviewJob id — stored in each persisted finding
+     * @throws GitHubApiException if the GitHub API call fails
+     */
+    public AnalysisOutcomeV2 runAnalysisV2(UUID jobId, String owner, String repo,
+                                            int pullNumber, String prUrl)
+            throws GitHubApiException {
+
+        // Run the existing single-shot pipeline for backward compat (summary/checklist)
+        AnalysisOutcome base = runAnalysis(owner, repo, pullNumber, prUrl);
+
+        // Run multi-step issue detection on the same PR data
+        PullRequestMetadata metadata = gitHubService.fetchMetadata(owner, repo, pullNumber);
+        List<ChangedFile> files = gitHubService.fetchChangedFiles(owner, repo, pullNumber);
+        List<RiskScore> riskScores = riskScoringService.score(files);
+
+        List<ReviewFinding> findings = issueDetectionService.detect(jobId, metadata, files, riskScores);
+
+        return new AnalysisOutcomeV2(base, findings);
     }
 
     public String toJson(ReviewResult result) {

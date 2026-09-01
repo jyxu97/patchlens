@@ -32,15 +32,19 @@ public class ReviewJobWorker {
         reviewJobService.markProcessing(message.jobId());
 
         try {
-            ReviewService.AnalysisOutcome outcome = reviewService.runAnalysis(
+            reviewJobService.markGeneratingFindings(message.jobId());
+
+            ReviewService.AnalysisOutcomeV2 outcome = reviewService.runAnalysisV2(
+                    message.jobId(),
                     message.owner(),
                     message.repo(),
                     message.pullNumber(),
                     message.pullRequestUrl()
             );
 
-            String resultJson = reviewService.toJson(outcome.reviewResult());
-            reviewJobService.markCompleted(message.jobId(), outcome.diffHash(), resultJson);
+            String resultJson = reviewService.toJson(outcome.base().reviewResult());
+            reviewJobService.markCompleted(message.jobId(), outcome.base().diffHash(),
+                    resultJson, outcome.findings().size());
 
         } catch (GitHubApiException e) {
             // GitHub API errors are unrecoverable (e.g. 404, 401) — mark failed immediately
