@@ -1,0 +1,19 @@
+{
+  "caseId": "cache-001",
+  "sampleId": "redis-session-cache",
+  "description": "Redis session cache migration — expects concurrency and error-handling findings",
+  "expectedFindings": [
+    {
+      "category": "CONCURRENCY",
+      "file": "src/main/java/com/example/auth/AuthService.java",
+      "lineRange": [1, 999],
+      "description": "Session TTL variable sessionTtl is referenced but not injected — NullPointerException at runtime"
+    },
+    {
+      "category": "ERROR_HANDLING",
+      "file": "src/main/java/com/example/auth/AuthService.java",
+      "lineRange": [1, 999],
+      "description": "No fallback when Redis is unavailable — service will fail completely on cache miss"
+    }
+  ]
+}

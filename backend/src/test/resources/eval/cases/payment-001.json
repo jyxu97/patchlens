@@ -1,0 +1,25 @@
+{
+  "caseId": "payment-001",
+  "sampleId": "stripe-checkout",
+  "description": "Stripe subscription checkout — expects security and correctness findings",
+  "expectedFindings": [
+    {
+      "category": "SECURITY",
+      "file": "src/main/resources/config/stripe-payment.yml",
+      "lineRange": [1, 999],
+      "description": "Stripe credentials in config file — should be loaded exclusively from environment variables"
+    },
+    {
+      "category": "SECURITY",
+      "file": "src/main/java/com/example/billing/SubscriptionController.java",
+      "lineRange": [1, 999],
+      "description": "Webhook handler must verify Stripe signature before processing events"
+    },
+    {
+      "category": "ERROR_HANDLING",
+      "file": "src/main/java/com/example/billing/CheckoutService.java",
+      "lineRange": [1, 999],
+      "description": "Stripe API exceptions are not caught — unhandled StripeException will propagate as 500"
+    }
+  ]
+}

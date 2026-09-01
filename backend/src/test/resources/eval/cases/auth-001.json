@@ -1,0 +1,25 @@
+{
+  "caseId": "auth-001",
+  "sampleId": "db-migration",
+  "description": "OAuth 2.0 migration that drops password columns — expects security and error-handling findings",
+  "expectedFindings": [
+    {
+      "category": "SECURITY",
+      "file": "db/migration/V5__add_oauth_token_drop_password.sql",
+      "lineRange": [1, 999],
+      "description": "Irreversible DROP COLUMN without a rollback migration guard"
+    },
+    {
+      "category": "ERROR_HANDLING",
+      "file": "src/main/java/com/example/auth/AuthController.java",
+      "lineRange": [1, 999],
+      "description": "OAuth callback does not validate the state parameter to prevent CSRF"
+    },
+    {
+      "category": "SECURITY",
+      "file": "src/main/java/com/example/auth/AuthController.java",
+      "lineRange": [1, 999],
+      "description": "Token returned in plain JSON response body — should use HttpOnly cookie"
+    }
+  ]
+}
