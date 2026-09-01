@@ -1,0 +1,8 @@
+language: java
+build:
+  command: "./mvnw -q -DskipTests test-compile"
+tests:
+  command: "./mvnw -q test"
+timeouts:
+  compile_seconds: 120
+  test_seconds: 300
