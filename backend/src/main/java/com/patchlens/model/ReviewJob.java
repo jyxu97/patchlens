@@ -63,6 +63,9 @@ public class ReviewJob {
     @Column(name = "trigger_source", nullable = false)
     private String triggerSource = "webhook";
 
+    @Column(name = "finding_count", nullable = false)
+    private int findingCount = 0;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -110,6 +113,7 @@ public class ReviewJob {
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
     public Instant getCompletedAt() { return completedAt; }
+    public int getFindingCount() { return findingCount; }
 
     public void setDiffHash(String diffHash) { this.diffHash = diffHash; }
     public void setStatus(JobStatus status) { this.status = status; }
@@ -117,4 +121,5 @@ public class ReviewJob {
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
     public void setAttemptCount(int attemptCount) { this.attemptCount = attemptCount; }
     public void setCompletedAt(Instant completedAt) { this.completedAt = completedAt; }
+    public void setFindingCount(int findingCount) { this.findingCount = findingCount; }
 }
