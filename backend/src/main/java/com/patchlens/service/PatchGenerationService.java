@@ -1,5 +1,8 @@
 package com.patchlens.service;
 
+import com.patchlens.ai.PatchAiService;
+import com.patchlens.ai.RepairAiService;
+import com.patchlens.ai.dto.PatchProposal;
 import com.patchlens.model.*;
 import com.patchlens.repository.PatchSuggestionRepository;
 import org.slf4j.Logger;
@@ -12,11 +15,10 @@ import java.util.*;
  * Generates unified diff patch suggestions for HIGH and MEDIUM severity findings.
  *
  * For each eligible finding:
- *   1. Calls OpenAIService.generatePatch()
+ *   1. Calls PatchAiService (LangChain4j) or OpenAIService.generatePatch() (legacy mock)
  *   2. Validates the patch output (format, size, allowed files)
- *   3. Saves a PatchSuggestion entity
- *
- * Phase 5 repair loop is also initiated here after failed validation.
+ *   3. Initiates repair loop (up to MAX_REPAIR_ATTEMPTS) using RepairAiService on failure
+ *   4. Saves a PatchSuggestion entity
  */
 @Service
 public class PatchGenerationService {
@@ -34,11 +36,17 @@ public class PatchGenerationService {
     private static final int MAX_REPAIR_ATTEMPTS = 2;
 
     private final OpenAIService openAIService;
+    private final Optional<PatchAiService> patchAiService;
+    private final Optional<RepairAiService> repairAiService;
     private final PatchSuggestionRepository patchSuggestionRepository;
 
     public PatchGenerationService(OpenAIService openAIService,
+                                  Optional<PatchAiService> patchAiService,
+                                  Optional<RepairAiService> repairAiService,
                                   PatchSuggestionRepository patchSuggestionRepository) {
         this.openAIService = openAIService;
+        this.patchAiService = patchAiService;
+        this.repairAiService = repairAiService;
         this.patchSuggestionRepository = patchSuggestionRepository;
     }
 
@@ -83,13 +91,14 @@ public class PatchGenerationService {
 
     /**
      * Generates a patch for one finding, validates it, and persists it.
-     * Returns null if generation or validation fails after all repair attempts.
+     * Returns null if generation fails after all repair attempts.
      */
     private PatchSuggestion tryGenerate(ReviewFinding finding,
                                          ChangedFile targetFile,
                                          List<String> contextChunks,
                                          Set<String> allowedFiles) {
-        OpenAIService.PatchOutput output = openAIService.generatePatch(finding, targetFile, contextChunks);
+        // Step 1 — Generate initial patch
+        OpenAIService.PatchOutput output = callGeneratePatch(finding, targetFile, contextChunks);
         PatchSuggestion patch = new PatchSuggestion(finding.getId(), output.unifiedDiff(), output.rationale());
         patch = patchSuggestionRepository.save(patch);
 
@@ -99,7 +108,7 @@ public class PatchGenerationService {
             return patchSuggestionRepository.save(patch);
         }
 
-        // Repair loop
+        // Bounded repair loop
         for (int attempt = 1; attempt <= MAX_REPAIR_ATTEMPTS; attempt++) {
             log.info("Repair attempt {}/{} for finding {}: {}", attempt, MAX_REPAIR_ATTEMPTS,
                     finding.getId(), validationError);
@@ -107,7 +116,7 @@ public class PatchGenerationService {
             patch.setRepairAttempts(attempt);
             patch = patchSuggestionRepository.save(patch);
 
-            OpenAIService.PatchOutput repaired = openAIService.repairPatch(finding, patch, validationError);
+            OpenAIService.PatchOutput repaired = callRepairPatch(finding, patch, validationError);
             patch.setPatchText(repaired.unifiedDiff());
             patch.setRationale(repaired.rationale());
             patch = patchSuggestionRepository.save(patch);
@@ -122,6 +131,64 @@ public class PatchGenerationService {
         patch.setStatus(ValidationStatus.REJECTED_POLICY);
         patchSuggestionRepository.save(patch);
         return null;
+    }
+
+    // =====================================================================
+    // LangChain4j / legacy dispatch
+    // =====================================================================
+
+    private OpenAIService.PatchOutput callGeneratePatch(ReviewFinding finding,
+                                                         ChangedFile targetFile,
+                                                         List<String> contextChunks) {
+        if (patchAiService.isPresent()) {
+            String findingDesc = buildFindingDescription(finding);
+            String targetCode  = targetFile.patch() != null
+                    ? truncate(targetFile.patch(), 4000) : "(no diff)";
+            String context     = String.join("\n\n", contextChunks);
+            String constraints = "Allowed file: " + finding.getFilePath()
+                    + ". Max " + MAX_PATCH_LINES + " lines.";
+
+            PatchProposal proposal = patchAiService.get()
+                    .generatePatch(findingDesc, targetCode, context, constraints);
+            return new OpenAIService.PatchOutput(
+                    proposal.unifiedDiff(), proposal.rationale(), proposal.expectedBehavior());
+        }
+        return openAIService.generatePatch(finding, targetFile, contextChunks);
+    }
+
+    private OpenAIService.PatchOutput callRepairPatch(ReviewFinding finding,
+                                                       PatchSuggestion previousPatch,
+                                                       String validationError) {
+        if (repairAiService.isPresent()) {
+            String findingDesc    = buildFindingDescription(finding);
+            String previousPatchText = previousPatch.getPatchText();
+            // Truncate error logs fed back to the model
+            String truncatedError = truncate(validationError, 2000);
+
+            PatchProposal proposal = repairAiService.get()
+                    .repair(findingDesc, previousPatchText, truncatedError, "");
+            return new OpenAIService.PatchOutput(
+                    proposal.unifiedDiff(), proposal.rationale(), proposal.expectedBehavior());
+        }
+        return openAIService.repairPatch(finding, previousPatch, validationError);
+    }
+
+    // =====================================================================
+    // Helpers
+    // =====================================================================
+
+    private String buildFindingDescription(ReviewFinding finding) {
+        return "File: " + finding.getFilePath()
+                + "\nLines: " + finding.getLineStart() + "-" + finding.getLineEnd()
+                + "\nSeverity: " + finding.getSeverity()
+                + "\nCategory: " + finding.getCategory()
+                + "\nTitle: " + finding.getTitle()
+                + "\nExplanation: " + finding.getExplanation();
+    }
+
+    private String truncate(String text, int maxChars) {
+        if (text == null) return "";
+        return text.length() > maxChars ? text.substring(0, maxChars) + "\n...(truncated)" : text;
     }
 
     /**

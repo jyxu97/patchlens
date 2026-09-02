@@ -1,0 +1,15 @@
+Issue being fixed:
+{{finding}}
+
+Previous patch (FAILED validation):
+{{previousPatch}}
+
+Validation failure output:
+{{validationFailure}}
+
+Repository context:
+<context>
+{{context}}
+</context>
+
+Fix the patch to address the validation failure above. Return a complete replacement unified diff.

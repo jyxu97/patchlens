@@ -1,0 +1,16 @@
+Issue to fix:
+{{finding}}
+
+Diff for the target file:
+<targetCode>
+{{targetCode}}
+</targetCode>
+
+Repository context:
+<context>
+{{context}}
+</context>
+
+Constraints: {{constraints}}
+
+Generate a minimal unified diff patch to fix the issue above. Modify only the file referenced in the finding.

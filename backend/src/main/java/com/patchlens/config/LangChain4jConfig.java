@@ -1,9 +1,13 @@
 package com.patchlens.config;
 
+import com.patchlens.ai.PatchAiService;
+import com.patchlens.ai.RepairAiService;
+import com.patchlens.ai.ReviewAiService;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.model.openai.OpenAiEmbeddingModel;
+import dev.langchain4j.service.AiServices;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -52,6 +56,40 @@ public class LangChain4jConfig {
         return OpenAiEmbeddingModel.builder()
                 .apiKey(apiKey)
                 .modelName(embeddingModelName)
+                .build();
+    }
+
+    /**
+     * Issue-detection AI service — wraps the multi-step review prompt
+     * (review-system-v1.txt + review-user-v1.txt) and returns structured findings.
+     */
+    @Bean
+    public ReviewAiService reviewAiService(ChatModel chatModel) {
+        return AiServices.builder(ReviewAiService.class)
+                .chatModel(chatModel)
+                .build();
+    }
+
+    /**
+     * Patch generation AI service — given a confirmed finding and the target
+     * file's diff, generates a minimal unified diff fix.
+     */
+    @Bean
+    public PatchAiService patchAiService(ChatModel chatModel) {
+        return AiServices.builder(PatchAiService.class)
+                .chatModel(chatModel)
+                .build();
+    }
+
+    /**
+     * Repair AI service — invoked when a generated patch fails sandbox
+     * validation; returns a replacement patch that addresses only the failure.
+     * Repair attempts are bounded by PatchGenerationService.MAX_REPAIR_ATTEMPTS.
+     */
+    @Bean
+    public RepairAiService repairAiService(ChatModel chatModel) {
+        return AiServices.builder(RepairAiService.class)
+                .chatModel(chatModel)
                 .build();
     }
 }

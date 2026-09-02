@@ -1,0 +1,13 @@
+Pull Request: {{prSummary}}
+
+<diff>
+{{diff}}
+</diff>
+
+<context>
+{{context}}
+</context>
+
+Constraints: {{constraints}}
+
+Identify real, evidence-grounded issues in the diff. For each finding, cite the exact file path and line numbers from the diff as evidence.
