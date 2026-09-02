@@ -28,6 +28,9 @@
     </scm>
     <properties>
         <java.version>21</java.version>
+        <!-- Core + OpenAI integration: stable. pgvector releases separately at beta cadence. -->
+        <langchain4j.version>1.19.0</langchain4j.version>
+        <langchain4j.pgvector.version>1.19.0-beta29</langchain4j.pgvector.version>
     </properties>
     <dependencies>
         <dependency>
@@ -86,6 +89,23 @@
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
             <scope>test</scope>
+        </dependency>
+
+        <!-- LangChain4j — manually configured (no Spring Boot starter) for Spring Boot 4 compatibility -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j</artifactId>
+            <version>${langchain4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-open-ai</artifactId>
+            <version>${langchain4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-pgvector</artifactId>
+            <version>${langchain4j.pgvector.version}</version>
         </dependency>
     </dependencies>
 
