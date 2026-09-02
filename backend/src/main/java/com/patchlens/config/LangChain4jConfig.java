@@ -3,15 +3,20 @@ package com.patchlens.config;
 import com.patchlens.ai.PatchAiService;
 import com.patchlens.ai.RepairAiService;
 import com.patchlens.ai.ReviewAiService;
+import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.langchain4j.model.openai.OpenAiEmbeddingModel;
 import dev.langchain4j.service.AiServices;
+import dev.langchain4j.store.embedding.EmbeddingStore;
+import dev.langchain4j.store.embedding.pgvector.PgVectorEmbeddingStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+
+import javax.sql.DataSource;
 
 /**
  * Manually wires LangChain4j beans without relying on the Spring Boot starter,
@@ -90,6 +95,33 @@ public class LangChain4jConfig {
     public RepairAiService repairAiService(ChatModel chatModel) {
         return AiServices.builder(RepairAiService.class)
                 .chatModel(chatModel)
+                .build();
+    }
+
+    /**
+     * LangChain4j pgvector embedding store.
+     *
+     * Stores embeddings in the {@code lc4j_embeddings} table (separate from the
+     * domain-specific {@code context_chunk} table so both schemas can coexist).
+     * {@code createTable=true} auto-provisions the table on first start.
+     *
+     * Metadata stored per segment:
+     *   repositoryOwner — GitHub repo owner
+     *   repositoryName  — GitHub repo name
+     *   filePath        — source file path within the repo
+     *   fileType        — classified type (SOURCE, DOC, CONFIG, …)
+     *
+     * Dimension (1536) matches text-embedding-3-small output.
+     * Use EmbeddingStore<TextSegment> as the injection type to avoid binding callers
+     * to the concrete PgVectorEmbeddingStore class.
+     */
+    @Bean
+    public EmbeddingStore<TextSegment> embeddingStore(DataSource dataSource, EmbeddingModel embeddingModel) {
+        return PgVectorEmbeddingStore.builder()
+                .datasource(dataSource)
+                .table("lc4j_embeddings")
+                .dimension(embeddingModel.dimension())
+                .createTable(true)
                 .build();
     }
 }
