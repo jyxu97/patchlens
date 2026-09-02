@@ -38,6 +38,4 @@ logs
 *.log
 
 # ==================== Private docs ====================
-design-doc.md
-ARCHITECTURE.md
-demo.gif
+docs/

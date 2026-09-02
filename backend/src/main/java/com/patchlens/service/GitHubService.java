@@ -10,7 +10,9 @@ import org.springframework.web.client.RestClient;
 import tools.jackson.databind.JsonNode;
 
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class GitHubService {
@@ -91,4 +93,45 @@ public class GitHubService {
         }
         return files;
     }
+
+    /**
+     * Fetches the raw byte content of a file at a specific ref (branch name or commit SHA).
+     * Calls: GET /repos/{owner}/{repo}/contents/{path}?ref={ref}
+     *
+     * @return the decoded file bytes, or empty if the file does not exist at that ref (404)
+     * @throws GitHubApiException for non-404 API errors
+     */
+    public Optional<byte[]> fetchFileContent(String owner, String repo, String path, String ref) {
+        // Build URI manually — path may contain slashes that must not be percent-encoded as %2F
+        String uri = "/repos/" + owner + "/" + repo + "/contents/" + path + "?ref=" + ref;
+
+        try {
+            JsonNode response = restClient.get()
+                    .uri(uri)
+                    .retrieve()
+                    .onStatus(status -> status.value() == 404, (req, res) -> {
+                        // File does not exist at this ref (e.g. added by the PR) — not an error
+                        throw new FileNotFoundException404();
+                    })
+                    .onStatus(HttpStatusCode::is4xxClientError, (req, res) -> {
+                        if (res.getStatusCode().value() == 403) {
+                            throw new GitHubApiException("GITHUB_RATE_LIMIT",
+                                    "GitHub API rate limit exceeded.");
+                        }
+                        throw new GitHubApiException("GITHUB_API_ERROR",
+                                "GitHub API error fetching file: " + res.getStatusCode());
+                    })
+                    .body(JsonNode.class);
+
+            // GitHub returns content as base64 with newlines embedded — strip whitespace before decoding
+            String encoded = response.get("content").asString().replaceAll("\\s", "");
+            return Optional.of(Base64.getDecoder().decode(encoded));
+
+        } catch (FileNotFoundException404 e) {
+            return Optional.empty();
+        }
+    }
+
+    /** Sentinel exception used to signal a 404 response from the Contents API. */
+    private static class FileNotFoundException404 extends RuntimeException {}
 }

@@ -1,8 +1,11 @@
 language: java
 build:
   command: "./mvnw -q -DskipTests test-compile"
+static_analysis:
+  command: "./mvnw -q checkstyle:check"
 tests:
   command: "./mvnw -q test"
 timeouts:
   compile_seconds: 120
+  static_analysis_seconds: 60
   test_seconds: 300
