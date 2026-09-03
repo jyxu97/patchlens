@@ -5,6 +5,12 @@ export interface MetricsResponse {
   cacheHitRate: number
   avgCacheMissLatencyMs: number
   avgCacheHitLatencyMs: number
+  findingsTotal: number
+  patchGeneratedTotal: number
+  patchApplySuccessRate: number
+  compileSuccessRate: number
+  testPassRate: number
+  repairAttemptRate: number
 }
 
 export type RiskLevel = 'low' | 'medium' | 'high'

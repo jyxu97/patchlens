@@ -3,13 +3,9 @@ package com.patchlens.service;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.model.embedding.EmbeddingModel;
 import dev.langchain4j.model.output.Response;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestClient;
-import tools.jackson.databind.JsonNode;
 
-import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -30,18 +26,12 @@ public class EmbeddingService {
     static final int EMBEDDING_DIMENSION = 1536;
 
     private final Optional<EmbeddingModel> embeddingModel;
-    private final RestClient restClient;
-    private final String embeddingModelName;
     private final String aiMode;
 
     public EmbeddingService(
             Optional<EmbeddingModel> embeddingModel,
-            @Qualifier("openAiRestClient") RestClient restClient,
-            @Value("${openai.embedding-model:text-embedding-3-small}") String embeddingModelName,
             @Value("${ai.mode:mock}") String aiMode) {
         this.embeddingModel = embeddingModel;
-        this.restClient = restClient;
-        this.embeddingModelName = embeddingModelName;
         this.aiMode = aiMode;
     }
 
@@ -55,36 +45,8 @@ public class EmbeddingService {
         if ("mock".equalsIgnoreCase(aiMode)) {
             return new float[EMBEDDING_DIMENSION];
         }
-        if (embeddingModel.isPresent()) {
-            return embedWithLangChain4j(text);
-        }
-        // Fallback: direct REST (should not be reached in normal openai mode)
-        return callEmbeddingsApi(text);
-    }
-
-    private float[] embedWithLangChain4j(String text) {
         Response<Embedding> response = embeddingModel.get().embed(text);
         return response.content().vector();
-    }
-
-    private float[] callEmbeddingsApi(String text) {
-        Map<String, Object> requestBody = Map.of(
-                "model", embeddingModelName,
-                "input", text
-        );
-
-        JsonNode response = restClient.post()
-                .uri("/v1/embeddings")
-                .body(requestBody)
-                .retrieve()
-                .body(JsonNode.class);
-
-        JsonNode embeddingArray = response.get("data").get(0).get("embedding");
-        float[] result = new float[embeddingArray.size()];
-        for (int i = 0; i < embeddingArray.size(); i++) {
-            result[i] = (float) embeddingArray.get(i).asDouble();
-        }
-        return result;
     }
 
     /** Converts a float[] to the PostgreSQL vector string format "[0.1,0.2,...]" */
