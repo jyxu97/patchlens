@@ -3,6 +3,8 @@ package com.patchlens.service;
 import com.patchlens.exception.GitHubApiException;
 import com.patchlens.model.ChangedFile;
 import com.patchlens.model.PullRequestMetadata;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.stereotype.Service;
@@ -12,10 +14,13 @@ import tools.jackson.databind.JsonNode;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 @Service
 public class GitHubService {
+
+    private static final Logger log = LoggerFactory.getLogger(GitHubService.class);
 
     private final RestClient restClient;
 
@@ -129,6 +134,31 @@ public class GitHubService {
 
         } catch (FileNotFoundException404 e) {
             return Optional.empty();
+        }
+    }
+
+    /**
+     * Posts a Markdown comment on a pull request.
+     * Uses the Issues API (PR numbers are issue numbers in GitHub's model).
+     * Calls: POST /repos/{owner}/{repo}/issues/{pullNumber}/comments
+     *
+     * Silently logs and returns on non-2xx responses so a comment failure
+     * never blocks the review job from completing.
+     */
+    public void postPrComment(String owner, String repo, int pullNumber, String body) {
+        try {
+            restClient.post()
+                    .uri("/repos/{owner}/{repo}/issues/{pull}/comments", owner, repo, pullNumber)
+                    .body(Map.of("body", body))
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, (req, res) -> {
+                        log.warn("Failed to post PR comment on {}/{} #{}: HTTP {}",
+                                owner, repo, pullNumber, res.getStatusCode());
+                    })
+                    .toBodilessEntity();
+            log.info("Posted review comment on {}/{} #{}", owner, repo, pullNumber);
+        } catch (Exception e) {
+            log.warn("Could not post PR comment on {}/{} #{}: {}", owner, repo, pullNumber, e.getMessage());
         }
     }
 

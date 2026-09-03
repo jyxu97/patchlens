@@ -66,11 +66,14 @@ public class ReviewService {
     }
 
     /**
-     * Result returned by runAnalysisV2 — extends AnalysisOutcome with multi-step findings.
+     * Result returned by runAnalysisV2 — extends AnalysisOutcome with multi-step findings
+     * and the raw PR data needed for patch generation and review comment posting.
      */
     public record AnalysisOutcomeV2(
             AnalysisOutcome base,
-            List<ReviewFinding> findings
+            List<ReviewFinding> findings,
+            List<ChangedFile> changedFiles,
+            List<String> contextChunks
     ) {}
 
     /**
@@ -290,7 +293,11 @@ public class ReviewService {
 
         List<ReviewFinding> findings = issueDetectionService.detect(jobId, metadata, files, riskScores);
 
-        return new AnalysisOutcomeV2(base, findings);
+        List<String> contextChunks = base.retrievedContext().stream()
+                .map(RetrievedContextChunk::content)
+                .toList();
+
+        return new AnalysisOutcomeV2(base, findings, files, contextChunks);
     }
 
     public String toJson(ReviewResult result) {

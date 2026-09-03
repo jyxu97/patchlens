@@ -117,7 +117,7 @@ public class LangChain4jConfig {
      */
     @Bean
     public EmbeddingStore<TextSegment> embeddingStore(DataSource dataSource, EmbeddingModel embeddingModel) {
-        return PgVectorEmbeddingStore.builder()
+        return PgVectorEmbeddingStore.datasourceBuilder()
                 .datasource(dataSource)
                 .table("lc4j_embeddings")
                 .dimension(embeddingModel.dimension())
