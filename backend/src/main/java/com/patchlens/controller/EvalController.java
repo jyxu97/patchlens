@@ -98,7 +98,9 @@ public class EvalController {
         m.put("precisionScore", run.getPrecisionScore());
         m.put("recallScore", run.getRecallScore());
         m.put("patchApplyRate", run.getPatchApplyRate());
+        m.put("initialCompileSuccessRate", run.getInitialCompileSuccessRate());
         m.put("compileSuccessRate", run.getCompileSuccessRate());
+        m.put("initialTestPassRate", run.getInitialTestPassRate());
         m.put("testPassRate", run.getTestPassRate());
         return m;
     }
@@ -109,9 +111,13 @@ public class EvalController {
         m.put("truePositives", r.getTruePositives());
         m.put("falsePositives", r.getFalsePositives());
         m.put("falseNegatives", r.getFalseNegatives());
-        m.put("patchApplySuccess", r.isPatchApplySuccess());
-        m.put("compileSuccess", r.isCompileSuccess());
-        m.put("testSuccess", r.isTestSuccess());
+        m.put("initialPatchApplySuccess", r.isInitialPatchApplySuccess());
+        m.put("initialCompileSuccess", r.isInitialCompileSuccess());
+        m.put("initialTestSuccess", r.isInitialTestSuccess());
+        m.put("finalPatchApplySuccess", r.isFinalPatchApplySuccess());
+        m.put("finalCompileSuccess", r.isFinalCompileSuccess());
+        m.put("finalTestSuccess", r.isFinalTestSuccess());
+        m.put("repairCount", r.getRepairCount());
         m.put("latencyMs", r.getLatencyMs());
         m.put("detectedFindings", r.getDetectedFindings());
         return m;

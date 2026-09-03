@@ -4,6 +4,7 @@ import com.patchlens.model.JobStatus;
 import com.patchlens.model.ReviewJob;
 import com.patchlens.repository.ReviewJobRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -20,7 +21,8 @@ import java.util.UUID;
 @Service
 public class ReviewJobService {
 
-    // Self-reference via Spring proxy so @Transactional(REQUIRES_NEW) on tryInsertJob works
+    // @Lazy breaks the circular reference; Spring still injects the transactional proxy
+    @Lazy
     @Autowired
     private ReviewJobService self;
 

@@ -33,7 +33,7 @@ public class PatchGenerationService {
     private static final int MAX_PATCH_LINES = 200;
 
     /** Maximum repair iterations per finding (beyond the initial attempt). */
-    private static final int MAX_REPAIR_ATTEMPTS = 2;
+    static final int MAX_REPAIR_ATTEMPTS = 2;
 
     private final OpenAIService openAIService;
     private final Optional<PatchAiService> patchAiService;
@@ -131,6 +131,36 @@ public class PatchGenerationService {
         patch.setStatus(ValidationStatus.REJECTED_POLICY);
         patchSuggestionRepository.save(patch);
         return null;
+    }
+
+    /**
+     * Generates a single patch for one finding with no repair loop.
+     * Used by the eval harness to control initial vs repair validation separately.
+     *
+     * @return saved PatchSuggestion (status PENDING — caller must validate and update)
+     */
+    public PatchSuggestion generateSinglePatch(ReviewFinding finding,
+                                                ChangedFile targetFile,
+                                                List<String> contextChunks) {
+        OpenAIService.PatchOutput output = callGeneratePatch(finding, targetFile, contextChunks);
+        PatchSuggestion patch = new PatchSuggestion(finding.getId(), output.unifiedDiff(), output.rationale());
+        return patchSuggestionRepository.save(patch);
+    }
+
+    /**
+     * Generates a repaired patch based on the validation error from the previous attempt.
+     * Used by the eval harness after an initial patch fails Docker validation.
+     *
+     * @return saved PatchSuggestion with incremented repairAttempts (status PENDING)
+     */
+    public PatchSuggestion repairSinglePatch(ReviewFinding finding,
+                                              PatchSuggestion previous,
+                                              String validationError) {
+        OpenAIService.PatchOutput repaired = callRepairPatch(finding, previous, validationError);
+        previous.setPatchText(repaired.unifiedDiff());
+        previous.setRationale(repaired.rationale());
+        previous.setRepairAttempts(previous.getRepairAttempts() + 1);
+        return patchSuggestionRepository.save(previous);
     }
 
     // =====================================================================

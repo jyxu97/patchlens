@@ -43,8 +43,17 @@ public class EvaluationRun {
     @Column(name = "patch_apply_rate")
     private Double patchApplyRate;
 
+    /** Compile success rate on the FIRST generated patch, before any repair. */
+    @Column(name = "initial_compile_success_rate")
+    private Double initialCompileSuccessRate;
+
+    /** Compile success rate after bounded repair — the headline "Z%" figure. */
     @Column(name = "compile_success_rate")
     private Double compileSuccessRate;
+
+    /** Test pass rate on the first generated patch, before any repair. */
+    @Column(name = "initial_test_pass_rate")
+    private Double initialTestPassRate;
 
     @Column(name = "test_pass_rate")
     private Double testPassRate;
@@ -73,14 +82,18 @@ public class EvaluationRun {
     public Instant getCompletedAt()       { return completedAt; }
     public Double getPrecisionScore()     { return precisionScore; }
     public Double getRecallScore()        { return recallScore; }
-    public Double getPatchApplyRate()     { return patchApplyRate; }
-    public Double getCompileSuccessRate() { return compileSuccessRate; }
-    public Double getTestPassRate()       { return testPassRate; }
+    public Double getPatchApplyRate()              { return patchApplyRate; }
+    public Double getInitialCompileSuccessRate()   { return initialCompileSuccessRate; }
+    public Double getCompileSuccessRate()          { return compileSuccessRate; }
+    public Double getInitialTestPassRate()         { return initialTestPassRate; }
+    public Double getTestPassRate()                { return testPassRate; }
 
-    public void setCompletedAt(Instant completedAt)         { this.completedAt = completedAt; }
-    public void setPrecisionScore(Double precisionScore)     { this.precisionScore = precisionScore; }
-    public void setRecallScore(Double recallScore)           { this.recallScore = recallScore; }
-    public void setPatchApplyRate(Double patchApplyRate)     { this.patchApplyRate = patchApplyRate; }
-    public void setCompileSuccessRate(Double r)              { this.compileSuccessRate = r; }
-    public void setTestPassRate(Double testPassRate)         { this.testPassRate = testPassRate; }
+    public void setCompletedAt(Instant completedAt)                       { this.completedAt = completedAt; }
+    public void setPrecisionScore(Double precisionScore)                   { this.precisionScore = precisionScore; }
+    public void setRecallScore(Double recallScore)                         { this.recallScore = recallScore; }
+    public void setPatchApplyRate(Double patchApplyRate)                   { this.patchApplyRate = patchApplyRate; }
+    public void setInitialCompileSuccessRate(Double r)                     { this.initialCompileSuccessRate = r; }
+    public void setCompileSuccessRate(Double r)                            { this.compileSuccessRate = r; }
+    public void setInitialTestPassRate(Double r)                           { this.initialTestPassRate = r; }
+    public void setTestPassRate(Double testPassRate)                       { this.testPassRate = testPassRate; }
 }

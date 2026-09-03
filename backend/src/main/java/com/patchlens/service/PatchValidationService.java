@@ -83,6 +83,88 @@ public class PatchValidationService {
         return runDockerValidation(patch, changedFiles, null, null, null, config);
     }
 
+    /**
+     * Eval-harness overload: uses provided source file content instead of fetching from GitHub
+     * or writing empty files. Allows the benchmark to run real Docker compile/test against
+     * curated fixture source without requiring a live GitHub token.
+     *
+     * @param sourceFiles map of repo-relative path → file content to write before applying the patch
+     */
+    public PatchValidation validate(PatchSuggestion patch,
+                                    java.util.Map<String, String> sourceFiles,
+                                    ValidationConfig config) {
+        if ("mock".equalsIgnoreCase(aiMode)) {
+            return saveMockValidation(patch);
+        }
+        return runDockerValidationWithSourceFiles(patch, sourceFiles, config);
+    }
+
+    private PatchValidation runDockerValidationWithSourceFiles(PatchSuggestion patch,
+                                                               java.util.Map<String, String> sourceFiles,
+                                                               ValidationConfig config) {
+        Path sandboxDir = Path.of("/tmp/patchlens-sandbox-" + java.util.UUID.randomUUID());
+        long start = System.currentTimeMillis();
+        boolean patchApplied = false, compilePassed = false,
+                staticAnalysisPassed = false, testsPassed = false;
+        StringBuilder logs = new StringBuilder();
+
+        try {
+            Files.createDirectories(sandboxDir);
+
+            // Write curated source files from fixture
+            for (var entry : sourceFiles.entrySet()) {
+                Path dest = sandboxDir.resolve(entry.getKey());
+                Files.createDirectories(dest.getParent());
+                Files.writeString(dest, entry.getValue());
+            }
+
+            Path patchFile = sandboxDir.resolve("patch.diff");
+            Files.writeString(patchFile, patch.getPatchText());
+
+            ProcessResult applyResult = runProcess(
+                    List.of("patch", "-p1", "--input=patch.diff"), sandboxDir, 30);
+            logs.append("=== patch apply ===\n").append(truncate(applyResult.output()));
+            patchApplied = applyResult.exitCode() == 0;
+
+            if (patchApplied) {
+                String dockerCmd = buildDockerCommand(sandboxDir, config);
+                int totalTimeout = config.getTimeouts().compileSeconds()
+                        + config.getTimeouts().staticAnalysisSeconds()
+                        + config.getTimeouts().testSeconds() + 30;
+                ProcessResult dockerResult = runProcess(
+                        List.of("bash", "-c", dockerCmd), sandboxDir, totalTimeout);
+                String out = dockerResult.output();
+                logs.append("\n=== docker run ===\n").append(truncate(out));
+                compilePassed        = out.contains("::COMPILE_OK::");
+                staticAnalysisPassed = !config.getStaticAnalysis().isEnabled()
+                        || out.contains("::STATIC_OK::");
+                testsPassed          = out.contains("::TEST_OK::");
+            }
+        } catch (Exception e) {
+            logs.append("\n=== error ===\n").append(e.getMessage());
+            log.warn("Docker validation (sourceFiles) error for patch {}: {}", patch.getId(), e.getMessage());
+        } finally {
+            deleteSandbox(sandboxDir);
+        }
+
+        long durationMs = System.currentTimeMillis() - start;
+        ValidationStatus status;
+        if (!patchApplied)              status = ValidationStatus.REJECTED_PATCH_APPLY;
+        else if (!compilePassed)        status = ValidationStatus.REJECTED_COMPILE;
+        else if (!staticAnalysisPassed) status = ValidationStatus.REJECTED_STATIC_ANALYSIS;
+        else if (!testsPassed)          status = ValidationStatus.REJECTED_TEST;
+        else                            status = ValidationStatus.VALIDATED;
+
+        patch.setStatus(status);
+        patchSuggestionRepository.save(patch);
+
+        PatchValidation pv = new PatchValidation(
+                patch.getId(), patchApplied, compilePassed,
+                staticAnalysisPassed, testsPassed,
+                truncate(logs.toString()), durationMs);
+        return validationRepository.save(pv);
+    }
+
     // =====================================================================
     // Mock mode
     // =====================================================================

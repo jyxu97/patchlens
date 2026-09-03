@@ -89,24 +89,26 @@ public class EvaluationService {
 
     private void execute(EvaluationRun run) {
         List<EvalCase> cases = loadEvalCases();
-        List<EvaluationCaseResult> caseResults = new ArrayList<>();
 
         int totalTp = 0, totalFp = 0, totalFn = 0;
-        int totalPatchApply = 0, totalCompile = 0, totalTest = 0, totalValidations = 0;
+        int totalInitialCompile = 0, totalFinalCompile = 0;
+        int totalInitialTest = 0,    totalFinalTest = 0;
+        int totalPatchApply = 0, totalValidations = 0;
 
         for (EvalCase ec : cases) {
             try {
                 EvaluationCaseResult result = evaluateCase(run.getId(), ec);
                 caseResultRepository.save(result);
-                caseResults.add(result);
 
                 totalTp += result.getTruePositives();
                 totalFp += result.getFalsePositives();
                 totalFn += result.getFalseNegatives();
 
-                if (result.isPatchApplySuccess()) totalPatchApply++;
-                if (result.isCompileSuccess())   totalCompile++;
-                if (result.isTestSuccess())       totalTest++;
+                if (result.isFinalPatchApplySuccess()) totalPatchApply++;
+                if (result.isInitialCompileSuccess())  totalInitialCompile++;
+                if (result.isFinalCompileSuccess())    totalFinalCompile++;
+                if (result.isInitialTestSuccess())     totalInitialTest++;
+                if (result.isFinalTestSuccess())       totalFinalTest++;
                 totalValidations++;
 
             } catch (Exception e) {
@@ -114,70 +116,142 @@ public class EvaluationService {
             }
         }
 
-        // Aggregate metrics
-        double precision = (totalTp + totalFp) > 0
-                ? (double) totalTp / (totalTp + totalFp) : 0.0;
-        double recall    = (totalTp + totalFn) > 0
-                ? (double) totalTp / (totalTp + totalFn) : 0.0;
-        double patchApplyRate = totalValidations > 0
-                ? (double) totalPatchApply / totalValidations : 0.0;
-        double compileRate    = totalValidations > 0
-                ? (double) totalCompile / totalValidations : 0.0;
-        double testRate       = totalValidations > 0
-                ? (double) totalTest / totalValidations : 0.0;
+        double precision           = rate(totalTp, totalTp + totalFp);
+        double recall              = rate(totalTp, totalTp + totalFn);
+        double patchApplyRate      = rate(totalPatchApply, totalValidations);
+        double initialCompileRate  = rate(totalInitialCompile, totalValidations);
+        double finalCompileRate    = rate(totalFinalCompile, totalValidations);
+        double initialTestRate     = rate(totalInitialTest, totalValidations);
+        double finalTestRate       = rate(totalFinalTest, totalValidations);
 
         run.setPrecisionScore(precision);
         run.setRecallScore(recall);
         run.setPatchApplyRate(patchApplyRate);
-        run.setCompileSuccessRate(compileRate);
-        run.setTestPassRate(testRate);
+        run.setInitialCompileSuccessRate(initialCompileRate);
+        run.setCompileSuccessRate(finalCompileRate);
+        run.setInitialTestPassRate(initialTestRate);
+        run.setTestPassRate(finalTestRate);
         run.setCompletedAt(Instant.now());
         runRepository.save(run);
 
-        log.info("Eval run {} complete — precision={:.2f} recall={:.2f} patch_apply={:.2f}",
-                run.getId(), precision, recall, patchApplyRate);
+        log.info("Eval run {} — precision={} recall={} compile: {}→{} test: {}→{}",
+                run.getId(),
+                pct(precision), pct(recall),
+                pct(initialCompileRate), pct(finalCompileRate),
+                pct(initialTestRate), pct(finalTestRate));
     }
 
+    /**
+     * Evaluates one case with the full initial → validate → repair → validate flow.
+     *
+     * When the eval case supplies {@code sourceFiles}, each validation step runs real
+     * Docker compile + test against those files. Without sourceFiles, Docker writes empty
+     * files (compile always fails) — only recall metrics are meaningful in that configuration.
+     */
     private EvaluationCaseResult evaluateCase(UUID runId, EvalCase ec) {
         long start = System.currentTimeMillis();
 
         SamplePrLoader.SamplePr sample = samplePrLoader.load(ec.sampleId());
         List<RiskScore> riskScores = riskScoringService.score(sample.files());
 
-        // Use a synthetic job ID for eval (no ReviewJob DB row needed)
         UUID syntheticJobId = UUID.randomUUID();
         List<ReviewFinding> detected = issueDetectionService.detect(
                 syntheticJobId, sample.metadata(), sample.files(), riskScores);
 
-        // Match findings
+        // Precision / recall matching
         int tp = 0, fp = 0;
         for (ReviewFinding df : detected) {
             if (isMatch(df, ec.expectedFindings())) tp++; else fp++;
         }
         int fn = Math.max(0, ec.expectedFindings().size() - tp);
 
-        // Patch + validate (using defaults — no Docker in eval)
-        List<PatchSuggestion> patches = patchGenerationService.generatePatches(
-                detected, sample.files(), List.of());
+        // Find the first HIGH/MEDIUM finding that has a matching changed file — same eligibility
+        // rule as PatchGenerationService so eval exercises the real codepath
+        ReviewFinding targetFinding = detected.stream()
+                .filter(f -> f.getSeverity() == com.patchlens.model.FindingSeverity.HIGH
+                          || f.getSeverity() == com.patchlens.model.FindingSeverity.MEDIUM)
+                .filter(f -> sample.files().stream()
+                        .anyMatch(cf -> cf.filename().equals(f.getFilePath())))
+                .findFirst().orElse(null);
 
-        boolean patchApply = false, compile = false, test = false;
-        if (!patches.isEmpty()) {
-            PatchValidation pv = patchValidationService.validate(
-                    patches.get(0), sample.files(), ValidationConfig.defaults());
-            patchApply = pv.isPatchApplied();
-            compile    = pv.isCompilePassed();
-            test       = pv.isTestsPassed();
+        boolean initApply = false, initCompile = false, initTest = false;
+        boolean finalApply = false, finalCompile = false, finalTest = false;
+        int repairCount = 0;
+
+        if (targetFinding != null) {
+            com.patchlens.model.ChangedFile targetFile = sample.files().stream()
+                    .filter(cf -> cf.filename().equals(targetFinding.getFilePath()))
+                    .findFirst().orElseThrow();
+
+            ValidationConfig config = ValidationConfig.defaults();
+
+            // Step 1 — Generate initial patch (no repair)
+            PatchSuggestion initial = patchGenerationService.generateSinglePatch(
+                    targetFinding, targetFile, List.of());
+
+            // Step 2 — Validate initial patch
+            PatchValidation initPv = ec.sourceFiles().isEmpty()
+                    ? patchValidationService.validate(initial, sample.files(), config)
+                    : patchValidationService.validate(initial, ec.sourceFiles(), config);
+            initApply   = initPv.isPatchApplied();
+            initCompile = initPv.isCompilePassed();
+            initTest    = initPv.isTestsPassed();
+
+            // Step 3 — Repair loop (bounded by MAX_REPAIR_ATTEMPTS)
+            PatchSuggestion current = initial;
+            boolean passed = initCompile && initTest;
+            while (!passed && repairCount < PatchGenerationService.MAX_REPAIR_ATTEMPTS) {
+                String errorFeedback = buildErrorFeedback(initPv);
+                current = patchGenerationService.repairSinglePatch(
+                        targetFinding, current, errorFeedback);
+                repairCount++;
+
+                PatchValidation repairPv = ec.sourceFiles().isEmpty()
+                        ? patchValidationService.validate(current, sample.files(), config)
+                        : patchValidationService.validate(current, ec.sourceFiles(), config);
+                finalApply   = repairPv.isPatchApplied();
+                finalCompile = repairPv.isCompilePassed();
+                finalTest    = repairPv.isTestsPassed();
+                passed = finalCompile && finalTest;
+                initPv = repairPv; // use last result for next error feedback
+            }
+
+            // If first attempt passed, final == initial
+            if (repairCount == 0) {
+                finalApply   = initApply;
+                finalCompile = initCompile;
+                finalTest    = initTest;
+            }
         }
 
         long latency = System.currentTimeMillis() - start;
-        String detectedJson = serializeFindings(detected);
-
         return new EvaluationCaseResult(
-                runId, ec.caseId(), detectedJson,
+                runId, ec.caseId(), serializeFindings(detected),
                 tp, fp, fn,
-                patchApply, compile, test,
-                latency, 0
+                initApply, initCompile, initTest,
+                finalApply, finalCompile, finalTest,
+                repairCount, latency, 0
         );
+    }
+
+    private String buildErrorFeedback(PatchValidation pv) {
+        if (!pv.isPatchApplied())   return "Patch did not apply cleanly. " + truncateLogs(pv.getLogs());
+        if (!pv.isCompilePassed())  return "Compile failed. " + truncateLogs(pv.getLogs());
+        if (!pv.isTestsPassed())    return "Tests failed. " + truncateLogs(pv.getLogs());
+        return "";
+    }
+
+    private String truncateLogs(String logs) {
+        if (logs == null) return "";
+        return logs.length() > 2000 ? logs.substring(0, 2000) + "...(truncated)" : logs;
+    }
+
+    private static double rate(int num, int denom) {
+        return denom > 0 ? (double) num / denom : 0.0;
+    }
+
+    private static String pct(double r) {
+        return String.format("%.0f%%", r * 100);
     }
 
     /**
@@ -203,7 +277,15 @@ public class EvaluationService {
     // =====================================================================
 
     record ExpectedFinding(FindingCategory category, String file, int[] lineRange, String description) {}
-    record EvalCase(String caseId, String sampleId, String description, List<ExpectedFinding> expectedFindings) {}
+
+    /**
+     * @param sourceFiles optional map of repo-relative path → file content; when present, Docker
+     *                    validation writes these files to the sandbox instead of empty stubs.
+     *                    Leave empty to measure recall only (compile metrics will be 0%).
+     */
+    record EvalCase(String caseId, String sampleId, String description,
+                    List<ExpectedFinding> expectedFindings,
+                    java.util.Map<String, String> sourceFiles) {}
 
     private List<EvalCase> loadEvalCases() {
         List<EvalCase> result = new ArrayList<>();
@@ -239,7 +321,15 @@ public class EvaluationService {
                                 fn.path("description").asString("")
                         ));
                     }
-                    result.add(new EvalCase(caseId, sampleId, desc, expected));
+                    // Parse optional sourceFiles map (path → content)
+                    java.util.Map<String, String> sourceFiles = new java.util.LinkedHashMap<>();
+                    JsonNode sfNode = root.path("sourceFiles");
+                    if (sfNode.isObject()) {
+                        sfNode.properties().forEach(e ->
+                                sourceFiles.put(e.getKey(), e.getValue().asString("")));
+                    }
+
+                    result.add(new EvalCase(caseId, sampleId, desc, expected, sourceFiles));
                 }
             } catch (Exception e) {
                 log.error("Failed to load eval case {}: {}", path, e.getMessage(), e);
