@@ -162,6 +162,81 @@ public class GitHubService {
         }
     }
 
+    /** A PR (issue) comment — only the fields needed to find and update our own comment. */
+    public record IssueComment(long id, String body) {}
+
+    private static final int COMMENTS_PER_PAGE = 100;
+    private static final int MAX_COMMENT_PAGES = 10;
+
+    /**
+     * Fetches the PR's current head commit SHA.
+     * Calls: GET /repos/{owner}/{repo}/pulls/{pullNumber}
+     *
+     * @throws GitHubApiException on any non-2xx response
+     */
+    public Optional<String> fetchHeadSha(String owner, String repo, int pullNumber) {
+        JsonNode response = restClient.get()
+                .uri("/repos/{owner}/{repo}/pulls/{pull}", owner, repo, pullNumber)
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, (req, res) -> {
+                    throw new GitHubApiException("GITHUB_API_ERROR",
+                            "GitHub API error fetching PR head: " + res.getStatusCode());
+                })
+                .body(JsonNode.class);
+        return Optional.ofNullable(response.path("head").path("sha").asString(null));
+    }
+
+    /**
+     * Lists comments on a PR (Issues API), following pagination up to
+     * {@value #MAX_COMMENT_PAGES} pages of {@value #COMMENTS_PER_PAGE}.
+     * Calls: GET /repos/{owner}/{repo}/issues/{pullNumber}/comments?per_page=100&page=N
+     *
+     * @throws GitHubApiException on any non-2xx response
+     */
+    public List<IssueComment> listPrComments(String owner, String repo, int pullNumber) {
+        List<IssueComment> comments = new ArrayList<>();
+        for (int page = 1; page <= MAX_COMMENT_PAGES; page++) {
+            JsonNode response = restClient.get()
+                    .uri("/repos/{owner}/{repo}/issues/{pull}/comments?per_page={per}&page={page}",
+                            owner, repo, pullNumber, COMMENTS_PER_PAGE, page)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, (req, res) -> {
+                        throw new GitHubApiException("GITHUB_API_ERROR",
+                                "GitHub API error listing PR comments: " + res.getStatusCode());
+                    })
+                    .body(JsonNode.class);
+
+            int count = 0;
+            for (JsonNode c : response) {
+                comments.add(new IssueComment(c.get("id").asLong(), c.path("body").asString("")));
+                count++;
+            }
+            if (count < COMMENTS_PER_PAGE) {
+                break;
+            }
+        }
+        return comments;
+    }
+
+    /**
+     * Replaces the body of an existing PR comment.
+     * Calls: PATCH /repos/{owner}/{repo}/issues/comments/{commentId}
+     *
+     * @throws GitHubApiException on any non-2xx response
+     */
+    public void updatePrComment(String owner, String repo, long commentId, String body) {
+        restClient.patch()
+                .uri("/repos/{owner}/{repo}/issues/comments/{id}", owner, repo, commentId)
+                .body(Map.of("body", body))
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, (req, res) -> {
+                    throw new GitHubApiException("GITHUB_API_ERROR",
+                            "GitHub API error updating PR comment: " + res.getStatusCode());
+                })
+                .toBodilessEntity();
+        log.info("Updated review comment {} on {}/{}", commentId, owner, repo);
+    }
+
     /** Sentinel exception used to signal a 404 response from the Contents API. */
     private static class FileNotFoundException404 extends RuntimeException {}
 }

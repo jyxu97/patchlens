@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -40,15 +41,29 @@ public class ReviewCommentService {
     }
 
     /**
-     * Formats findings and patches as Markdown and posts a single review comment.
+     * Formats findings and patches as Markdown and posts (or updates) the job's review comment.
      *
+     * <p>Idempotent per job: the comment starts with a hidden marker containing the job ID.
+     * If a comment with that marker already exists on the PR — e.g. a previous attempt posted
+     * it and then crashed before the job was marked COMPLETED — it is updated in place instead
+     * of posting a duplicate. The marker lives on GitHub, so this holds even when the crash
+     * happens between the POST and any local bookkeeping.
+     *
+     * <p>Stale-safe: if the PR head has moved past {@code headSha}, the review describes an
+     * outdated commit and is not posted; the newer commit's own job will post its review.
+     *
+     * <p>Never throws — comment failures must not fail an otherwise successful review job.
+     *
+     * @param jobId       owning review job (used as the idempotency marker)
+     * @param headSha     commit SHA this job was created for (may be null / "unknown")
      * @param owner       GitHub repository owner
      * @param repo        GitHub repository name
      * @param pullNumber  PR number
      * @param findings    detected findings (may be empty — no comment posted if so)
      * @param patches     generated patches; may be fewer than findings (only HIGH/MEDIUM)
      */
-    public void postReview(String owner, String repo, int pullNumber,
+    public void postReview(UUID jobId, String headSha,
+                           String owner, String repo, int pullNumber,
                            List<ReviewFinding> findings,
                            List<PatchSuggestion> patches) {
         if (findings.isEmpty()) {
@@ -60,8 +75,50 @@ public class ReviewCommentService {
             return;
         }
 
-        String body = buildComment(findings, patches);
-        gitHubService.postPrComment(owner, repo, pullNumber, body);
+        try {
+            if (isStale(headSha, owner, repo, pullNumber)) {
+                log.info("PR {}/{} #{} head moved past {} — skipping stale review comment for job {}",
+                        owner, repo, pullNumber, headSha, jobId);
+                return;
+            }
+
+            String marker = markerFor(jobId);
+            String body = marker + "\n" + buildComment(findings, patches);
+
+            Optional<GitHubService.IssueComment> existing = gitHubService
+                    .listPrComments(owner, repo, pullNumber).stream()
+                    .filter(c -> c.body() != null && c.body().contains(marker))
+                    .findFirst();
+
+            if (existing.isPresent()) {
+                gitHubService.updatePrComment(owner, repo, existing.get().id(), body);
+            } else {
+                gitHubService.postPrComment(owner, repo, pullNumber, body);
+            }
+        } catch (Exception e) {
+            // If we can't verify whether a comment already exists, skip rather than risk a duplicate.
+            log.warn("Could not post review comment for job {} on {}/{} #{}: {}",
+                    jobId, owner, repo, pullNumber, e.getMessage());
+        }
+    }
+
+    /** Hidden HTML marker identifying the comment owned by a review job. */
+    static String markerFor(UUID jobId) {
+        return "<!-- patchlens:job=" + jobId + " -->";
+    }
+
+    /**
+     * True if the PR's current head differs from the commit this job reviewed.
+     * Unknown SHAs (manual triggers, malformed payloads) can't be compared, so they are
+     * treated as not stale.
+     */
+    private boolean isStale(String headSha, String owner, String repo, int pullNumber) {
+        if (headSha == null || headSha.isBlank() || "unknown".equals(headSha)) {
+            return false;
+        }
+        return gitHubService.fetchHeadSha(owner, repo, pullNumber)
+                .map(current -> !current.equals(headSha))
+                .orElse(false);
     }
 
     // =====================================================================

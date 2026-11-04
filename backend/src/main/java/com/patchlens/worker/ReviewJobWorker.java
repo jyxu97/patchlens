@@ -4,14 +4,18 @@ import com.patchlens.config.RabbitMQConfig;
 import com.patchlens.dto.ReviewJobMessage;
 import com.patchlens.exception.GitHubApiException;
 import com.patchlens.model.PatchSuggestion;
+import com.patchlens.model.ReviewJob;
 import com.patchlens.service.PatchGenerationService;
 import com.patchlens.service.ReviewCommentService;
 import com.patchlens.service.ReviewJobService;
 import com.patchlens.service.ReviewService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Async RabbitMQ consumer for the review.jobs queue.
@@ -26,6 +30,8 @@ import java.util.List;
  */
 @Component
 public class ReviewJobWorker {
+
+    private static final Logger log = LoggerFactory.getLogger(ReviewJobWorker.class);
 
     private final ReviewJobService reviewJobService;
     private final ReviewService reviewService;
@@ -44,8 +50,14 @@ public class ReviewJobWorker {
 
     @RabbitListener(queues = RabbitMQConfig.REVIEW_JOBS_QUEUE)
     public void process(ReviewJobMessage message) {
-        // Transition to PROCESSING immediately (each delivery = one attempt)
-        reviewJobService.markProcessing(message.jobId());
+        // Claim the job (each delivery = one attempt). A redelivered message for a job
+        // that already finished is acked as a no-op instead of re-running the pipeline.
+        Optional<ReviewJob> claimed = reviewJobService.startProcessing(message.jobId());
+        if (claimed.isEmpty()) {
+            log.info("Job {} already in a terminal state — skipping redelivered message", message.jobId());
+            return;
+        }
+        String headSha = claimed.get().getHeadSha();
 
         try {
             // Stage 1 — Issue Detection (diff understanding + RAG retrieval + LLM findings)
@@ -66,8 +78,10 @@ public class ReviewJobWorker {
                     outcome.contextChunks()
             );
 
-            // Stage 3 — Post advisory review comment on the PR (no-op if no GitHub token)
+            // Stage 3 — Post advisory review comment on the PR (no-op if no GitHub token).
+            // Idempotent per job and skipped if the PR head has moved past headSha.
             reviewCommentService.postReview(
+                    message.jobId(), headSha,
                     message.owner(), message.repo(), message.pullNumber(),
                     outcome.findings(), patches
             );

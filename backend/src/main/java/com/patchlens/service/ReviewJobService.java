@@ -85,16 +85,28 @@ public class ReviewJobService {
     }
 
     /**
-     * Transitions the job to PROCESSING and increments the attempt counter.
+     * Claims the job for processing: transitions it to PROCESSING and increments the
+     * attempt counter — unless the job has already reached a terminal state.
+     *
+     * <p>RabbitMQ delivery is at-least-once: a worker that crashes after finishing but
+     * before acking causes the same message to be redelivered. Returning empty for
+     * COMPLETED / DEAD_LETTER jobs lets the worker ack the duplicate without re-running
+     * the pipeline. FAILED and in-progress states are still claimable, because those are
+     * exactly the states a legitimate retry (or crash redelivery) starts from.
+     *
+     * @return the claimed job, or empty if the job is already terminal
      */
     @Transactional
-    public ReviewJob markProcessing(UUID jobId) {
+    public Optional<ReviewJob> startProcessing(UUID jobId) {
         ReviewJob job = findOrThrow(jobId);
+        if (job.getStatus() == JobStatus.COMPLETED || job.getStatus() == JobStatus.DEAD_LETTER) {
+            return Optional.empty();
+        }
         job.setStatus(JobStatus.PROCESSING);
         job.setAttemptCount(job.getAttemptCount() + 1);
         ReviewJob saved = repository.save(job);
         emitter.emit(saved);
-        return saved;
+        return Optional.of(saved);
     }
 
     /**
