@@ -138,28 +138,29 @@ public class GitHubService {
     }
 
     /**
-     * Posts a Markdown comment on a pull request.
-     * Uses the Issues API (PR numbers are issue numbers in GitHub's model).
+     * Creates a Markdown comment on a pull request (Issues API — PR numbers are issue numbers).
      * Calls: POST /repos/{owner}/{repo}/issues/{pullNumber}/comments
      *
-     * Silently logs and returns on non-2xx responses so a comment failure
-     * never blocks the review job from completing.
+     * @return the new comment's id
+     * @throws GitHubApiException on any non-2xx response (with the HTTP status)
      */
-    public void postPrComment(String owner, String repo, int pullNumber, String body) {
-        try {
-            restClient.post()
-                    .uri("/repos/{owner}/{repo}/issues/{pull}/comments", owner, repo, pullNumber)
-                    .body(Map.of("body", body))
-                    .retrieve()
-                    .onStatus(HttpStatusCode::isError, (req, res) -> {
-                        log.warn("Failed to post PR comment on {}/{} #{}: HTTP {}",
-                                owner, repo, pullNumber, res.getStatusCode());
-                    })
-                    .toBodilessEntity();
-            log.info("Posted review comment on {}/{} #{}", owner, repo, pullNumber);
-        } catch (Exception e) {
-            log.warn("Could not post PR comment on {}/{} #{}: {}", owner, repo, pullNumber, e.getMessage());
-        }
+    public long createPrComment(String owner, String repo, int pullNumber, String body) {
+        JsonNode created = restClient.post()
+                .uri("/repos/{owner}/{repo}/issues/{pull}/comments", owner, repo, pullNumber)
+                .body(Map.of("body", body))
+                .retrieve()
+                .onStatus(HttpStatusCode::isError, (req, res) -> {
+                    throw error("posting PR comment", res.getStatusCode().value());
+                })
+                .body(JsonNode.class);
+        long id = created == null ? -1 : created.path("id").asLong(-1);
+        log.info("Posted review comment {} on {}/{} #{}", id, owner, repo, pullNumber);
+        return id;
+    }
+
+    private static GitHubApiException error(String action, int status) {
+        String code = status == 403 || status == 429 ? "GITHUB_RATE_LIMIT" : "GITHUB_API_ERROR";
+        return new GitHubApiException(code, "GitHub API error " + action + ": HTTP " + status, status);
     }
 
     /** A PR (issue) comment — only the fields needed to find and update our own comment. */
@@ -179,8 +180,7 @@ public class GitHubService {
                 .uri("/repos/{owner}/{repo}/pulls/{pull}", owner, repo, pullNumber)
                 .retrieve()
                 .onStatus(HttpStatusCode::isError, (req, res) -> {
-                    throw new GitHubApiException("GITHUB_API_ERROR",
-                            "GitHub API error fetching PR head: " + res.getStatusCode());
+                    throw error("fetching PR head", res.getStatusCode().value());
                 })
                 .body(JsonNode.class);
         return Optional.ofNullable(response.path("head").path("sha").asString(null));
@@ -201,8 +201,7 @@ public class GitHubService {
                             owner, repo, pullNumber, COMMENTS_PER_PAGE, page)
                     .retrieve()
                     .onStatus(HttpStatusCode::isError, (req, res) -> {
-                        throw new GitHubApiException("GITHUB_API_ERROR",
-                                "GitHub API error listing PR comments: " + res.getStatusCode());
+                        throw error("listing PR comments", res.getStatusCode().value());
                     })
                     .body(JsonNode.class);
 
@@ -230,8 +229,7 @@ public class GitHubService {
                 .body(Map.of("body", body))
                 .retrieve()
                 .onStatus(HttpStatusCode::isError, (req, res) -> {
-                    throw new GitHubApiException("GITHUB_API_ERROR",
-                            "GitHub API error updating PR comment: " + res.getStatusCode());
+                    throw error("updating PR comment", res.getStatusCode().value());
                 })
                 .toBodilessEntity();
         log.info("Updated review comment {} on {}/{}", commentId, owner, repo);

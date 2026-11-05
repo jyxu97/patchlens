@@ -3,6 +3,7 @@ package com.patchlens.worker;
 import com.patchlens.config.RabbitMQConfig;
 import com.patchlens.dto.ReviewJobMessage;
 import com.patchlens.exception.GitHubApiException;
+import com.patchlens.model.JobStatus;
 import com.patchlens.model.PatchSuggestion;
 import com.patchlens.model.ReviewJob;
 import com.patchlens.sandbox.GitHubSnapshotService;
@@ -30,7 +31,12 @@ import java.util.Optional;
  *   GENERATING_PATCHES  initial candidate diff per HIGH/MEDIUM finding (LangChain4j)
  *   VALIDATING_PATCHES  policy → Docker sandbox (apply, compile, tests) on a snapshot of the
  *                       pinned SHA → bounded repair (≤2), each attempt in a fresh workspace
- *   COMPLETED           post/update the GitHub review comment
+ *   COMPLETED           results + rendered comment stored atomically; comment delivered
+ *                       (and retried independently by ReliabilityScheduler)
+ * </pre>
+ * Every transition is fenced by the job lease, so two deliveries of the same message can never
+ * both process the job. A heartbeat renews the lease while the worker runs.
+ * <pre>
  * </pre>
  *
  * NOTE: intentionally NOT @Transactional — wrapping long model calls and sandbox builds in a
@@ -48,6 +54,7 @@ public class ReviewJobWorker {
     private final GitHubService gitHubService;
     private final GitHubSnapshotService snapshotService;
     private final ReviewCommentService reviewCommentService;
+    private final CommentDeliveryService commentDeliveryService;
 
     public ReviewJobWorker(ReviewJobService reviewJobService,
                            ReviewService reviewService,
@@ -55,7 +62,8 @@ public class ReviewJobWorker {
                            PatchPipelineService patchPipelineService,
                            GitHubService gitHubService,
                            GitHubSnapshotService snapshotService,
-                           ReviewCommentService reviewCommentService) {
+                           ReviewCommentService reviewCommentService,
+                           CommentDeliveryService commentDeliveryService) {
         this.reviewJobService = reviewJobService;
         this.reviewService = reviewService;
         this.patchGenerationService = patchGenerationService;
@@ -63,19 +71,37 @@ public class ReviewJobWorker {
         this.gitHubService = gitHubService;
         this.snapshotService = snapshotService;
         this.reviewCommentService = reviewCommentService;
+        this.commentDeliveryService = commentDeliveryService;
     }
 
     @RabbitListener(queues = RabbitMQConfig.REVIEW_JOBS_QUEUE)
     public void process(ReviewJobMessage message) {
-        // Claim the job (each delivery = one attempt). A redelivered message for a job
-        // that already finished is acked as a no-op instead of re-running the pipeline.
-        Optional<ReviewJob> claimed = reviewJobService.startProcessing(message.jobId());
+        // Atomically claim the job for this delivery. Empty when the job is terminal (a duplicate
+        // or redelivered message) or another delivery holds a live lease — ack and drop; if that
+        // worker crashes, its lease expires and ReliabilityScheduler republishes the job.
+        Optional<JobLease> claimed = reviewJobService.claim(message.jobId());
         if (claimed.isEmpty()) {
-            log.info("Job {} already in a terminal state — skipping redelivered message", message.jobId());
+            log.info("Job {} is terminal or owned by another delivery — skipping message", message.jobId());
             return;
         }
-        String headSha = claimed.get().getHeadSha();
+        boolean completed;
+        try (JobLease lease = claimed.get()) {
+            String headSha = reviewJobService.findById(message.jobId()).map(ReviewJob::getHeadSha).orElse(null);
+            completed = run(lease, message, headSha);
+        } catch (JobLease.LeaseLostException e) {
+            // Another delivery took over after our lease expired; it owns the results now.
+            log.warn("{} — abandoning this delivery without writing results", e.getMessage());
+            return;
+        }
+        if (completed) {
+            // First delivery attempt inline; failures are retried by ReliabilityScheduler
+            // without re-running analysis.
+            commentDeliveryService.deliver(message.jobId());
+        }
+    }
 
+    /** @return true if the job reached COMPLETED */
+    private boolean run(JobLease lease, ReviewJobMessage message, String headSha) {
         try {
             // Pin the exact revision under review. Webhook jobs carry head.sha; otherwise use the
             // PR's current head, resolved once, so analysis and validation target the same code.
@@ -84,7 +110,7 @@ public class ReviewJobWorker {
                     : gitHubService.fetchHeadSha(message.owner(), message.repo(), message.pullNumber()).orElse(null);
 
             // Stage 1 — Issue Detection (diff understanding + RAG retrieval + LLM findings)
-            reviewJobService.markGeneratingFindings(message.jobId());
+            reviewJobService.advance(lease, JobStatus.GENERATING_FINDINGS);
             ReviewService.AnalysisOutcomeV2 outcome = reviewService.runAnalysisV2(
                     message.jobId(),
                     message.owner(),
@@ -97,13 +123,12 @@ public class ReviewJobWorker {
             // we analysed, the findings may describe newer code than the pinned SHA: stop here and
             // let the newer commit's own job review it.
             if (pinnedSha != null && headMovedPast(pinnedSha, message)) {
-                reviewJobService.markSuperseded(message.jobId(),
-                        "PR head moved past " + pinnedSha + " during analysis");
-                return;
+                reviewJobService.supersede(lease, "PR head moved past " + pinnedSha + " during analysis");
+                return false;
             }
 
             // Stage 2 — Patch Generation (HIGH/MEDIUM findings only)
-            reviewJobService.markGeneratingPatches(message.jobId());
+            reviewJobService.advance(lease, JobStatus.GENERATING_PATCHES);
             List<PatchGenerationService.Candidate> candidates = patchGenerationService.generateCandidates(
                     outcome.findings(),
                     outcome.changedFiles(),
@@ -111,36 +136,36 @@ public class ReviewJobWorker {
             );
 
             // Stage 3 — Sandbox validation + bounded repair against the pinned snapshot
-            reviewJobService.markValidatingPatches(message.jobId());
+            reviewJobService.advance(lease, JobStatus.VALIDATING_PATCHES);
             RepositorySnapshot snapshot = snapshotFor(message.owner(), message.repo(), pinnedSha);
             List<PatchSuggestion> patches = candidates.stream()
-                    .map(c -> patchPipelineService.validateAndRepair(c.finding(), c.patch(), snapshot).patch())
+                    .map(c -> {
+                        lease.ensureHeld();
+                        return patchPipelineService.validateAndRepair(c.finding(), c.patch(), snapshot).patch();
+                    })
                     .toList();
 
-            // Stage 4 — Post advisory review comment on the PR (no-op if no GitHub token).
-            // Idempotent per job and skipped if the PR head has moved past headSha.
-            reviewCommentService.postReview(
-                    message.jobId(), headSha,
-                    message.owner(), message.repo(), message.pullNumber(),
-                    outcome.findings(), patches
-            );
-
-            // Persist final job state
+            // Stage 4 — Persist results and the rendered comment atomically; delivery follows.
+            ReviewJobService.CommentPlan plan = reviewCommentService.canPost()
+                    ? reviewCommentService.render(message.jobId(), outcome.findings(), patches)
+                            .map(ReviewJobService.CommentPlan::deliver).orElse(ReviewJobService.CommentPlan.none())
+                    : ReviewJobService.CommentPlan.none();
             String resultJson = reviewService.toJson(outcome.base().reviewResult());
-            reviewJobService.markCompleted(
-                    message.jobId(), outcome.base().diffHash(),
-                    resultJson, outcome.findings().size()
-            );
+            reviewJobService.complete(lease, outcome.base().diffHash(), resultJson, outcome.findings().size(), plan);
+            return true;
+
+        } catch (JobLease.LeaseLostException e) {
+            throw e;
 
         } catch (GitHubApiException e) {
             // GitHub API errors are unrecoverable (404, 401) — mark failed, don't requeue
-            reviewJobService.markFailed(message.jobId(), Redactor.redact(e.getMessage()));
+            reviewJobService.fail(lease, e.getMessage());
             throw new org.springframework.amqp.AmqpRejectAndDontRequeueException(
-                    "GitHub API error — not retrying: " + e.getMessage(), e);
+                    "GitHub API error — not retrying: " + Redactor.redact(e.getMessage()), e);
 
-        } catch (Exception e) {
-            // Transient failure — mark as FAILED and let Spring AMQP retry
-            reviewJobService.markFailed(message.jobId(), Redactor.redact(e.getMessage()));
+        } catch (RuntimeException e) {
+            // Transient failure — release the lease and let Spring AMQP retry
+            reviewJobService.fail(lease, e.getMessage());
             throw e;
         }
     }

@@ -1,16 +1,15 @@
 package com.patchlens.controller;
 
-import com.patchlens.config.RabbitMQConfig;
-import com.patchlens.dto.ReviewJobMessage;
 import com.patchlens.dto.WebhookPrPayload;
+import com.patchlens.model.JobStatus;
 import com.patchlens.model.ReviewJob;
+import com.patchlens.service.JobPublisher;
 import com.patchlens.service.ReviewJobService;
 import com.patchlens.service.WebhookDeduplicationService;
 import com.patchlens.service.WebhookSignatureValidator;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import tools.jackson.databind.ObjectMapper;
@@ -37,18 +36,18 @@ public class WebhookController {
     private final WebhookSignatureValidator signatureValidator;
     private final WebhookDeduplicationService deduplicationService;
     private final ReviewJobService reviewJobService;
-    private final RabbitTemplate rabbitTemplate;
+    private final JobPublisher jobPublisher;
     private final ObjectMapper objectMapper;
 
     public WebhookController(WebhookSignatureValidator signatureValidator,
                              WebhookDeduplicationService deduplicationService,
                              ReviewJobService reviewJobService,
-                             RabbitTemplate rabbitTemplate,
+                             JobPublisher jobPublisher,
                              ObjectMapper objectMapper) {
         this.signatureValidator = signatureValidator;
         this.deduplicationService = deduplicationService;
         this.reviewJobService = reviewJobService;
-        this.rabbitTemplate = rabbitTemplate;
+        this.jobPublisher = jobPublisher;
         this.objectMapper = objectMapper;
     }
 
@@ -93,7 +92,7 @@ public class WebhookController {
         String headSha = webhookPayload.pullRequest().head() != null
                 ? webhookPayload.pullRequest().head().sha() : "unknown";
 
-        // Primary dedup gate: Redis SET NX (atomic, 24 h TTL).
+        // Primary dedup gate: Redis SET NX (atomic; provisional TTL until the job is committed).
         // Falls open if Redis is unavailable; DB unique constraint is the safety net.
         if (!deduplicationService.claim(owner, repo, pullNumber, headSha)) {
             log.info("Duplicate webhook suppressed for {}/{} PR#{} sha={}",
@@ -104,25 +103,25 @@ public class WebhookController {
             ));
         }
 
-        // Idempotency: reuse existing job for the same PR commit (concurrent-safe)
-        ReviewJob job = reviewJobService.createOrFind(owner, repo, pullNumber, prUrl, headSha);
+        // Idempotency: reuse existing job for the same PR commit (concurrent-safe).
+        ReviewJob job;
+        try {
+            job = reviewJobService.createOrFind(owner, repo, pullNumber, prUrl, headSha);
+        } catch (RuntimeException e) {
+            // Nothing durable was recorded: release the claim and let GitHub redeliver (5xx).
+            deduplicationService.release(owner, repo, pullNumber, headSha);
+            log.error("Could not create review job for {}/{} PR#{}: {}", owner, repo, pullNumber, e.getMessage());
+            return ResponseEntity.status(503).body(Map.of(
+                    "error", "JOB_NOT_CREATED",
+                    "message", "Review job could not be persisted; retry the delivery."
+            ));
+        }
+        deduplicationService.confirm(owner, repo, pullNumber, headSha);
 
-        // Publish message to RabbitMQ (only if job is still PENDING — don't re-queue PROCESSING jobs)
-        switch (job.getStatus()) {
-            case PENDING -> {
-                ReviewJobMessage message = new ReviewJobMessage(
-                        job.getId(), owner, repo, pullNumber, prUrl);
-                rabbitTemplate.convertAndSend(
-                        RabbitMQConfig.REVIEWS_EXCHANGE,
-                        RabbitMQConfig.REVIEW_JOBS_ROUTING_KEY,
-                        message);
-            }
-            case PROCESSING -> {
-                // Already being worked on — return existing job ID
-            }
-            default -> {
-                // Completed/failed jobs are not re-submitted here
-            }
+        // Outbox: the job row is committed; publish now if it never was. A broker failure leaves
+        // publishedAt null and ReliabilityScheduler republishes — the accepted job is not lost.
+        if (job.getStatus() == JobStatus.PENDING && job.getPublishedAt() == null) {
+            jobPublisher.publish(job);
         }
 
         return ResponseEntity.accepted().body(Map.of(

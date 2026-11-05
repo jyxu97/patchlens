@@ -20,6 +20,17 @@ CREATE TABLE IF NOT EXISTS review_jobs (
     updated_at          TIMESTAMP,
     completed_at        TIMESTAMP,
     finding_count       INT          NOT NULL DEFAULT 0,
+    lease_owner         VARCHAR(64),
+    lease_expires_at    TIMESTAMP,
+    published_at        TIMESTAMP,
+    publish_attempts    INT,
+    comment_status      VARCHAR(30),
+    comment_body        CLOB,
+    comment_id          BIGINT,
+    comment_attempts    INT,
+    comment_last_error  CLOB,
+    comment_next_attempt_at TIMESTAMP,
+    comment_lease_until TIMESTAMP,
     CONSTRAINT uq_review_jobs_pr_head_sha
         UNIQUE (repository_owner, repository_name, pull_request_number, head_sha)
 );

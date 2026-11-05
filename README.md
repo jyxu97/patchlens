@@ -94,8 +94,8 @@ JobStatusEmitter  SSE push to client  PENDING → PROCESSING → COMPLETED
 ### Webhook flow (primary)
 
 1. GitHub sends a `pull_request` event to `POST /api/webhooks/github`
-2. Backend validates the HMAC-SHA256 signature, calls Redis `SET NX` as an atomic dedup gate — duplicate deliveries return 202 immediately with no DB write. A `ReviewJob` (status: PENDING) is created and published to RabbitMQ.
-3. `ReviewJobWorker` runs three sequential stages:
+2. Backend validates the HMAC-SHA256 signature, calls Redis `SET NX` as an atomic dedup gate — duplicate deliveries return 202 immediately with no DB write. A `ReviewJob` (status: PENDING) is created (DB unique constraint on repo + PR + head SHA) and published to RabbitMQ through the job-row outbox.
+3. `ReviewJobWorker` claims the job atomically (row lock + expiring lease) and runs the stages below; every transition is fenced by the lease.
 
    **Stage 1 — Finding detection**
    - Fetches PR metadata and changed files from GitHub API
@@ -126,6 +126,26 @@ JobStatusEmitter  SSE push to client  PENDING → PROCESSING → COMPLETED
 1. User enters a GitHub PR URL (or clicks **Try Sample PR**) in the web UI
 2. `POST /api/reviews/analyze` runs the diff hash + risk scoring + RAG + LLM pipeline synchronously and returns the full review brief in one response
 3. Frontend displays the structured review brief and the retrieved context chunks that grounded it
+
+---
+
+### Reliability model
+
+RabbitMQ gives at-least-once delivery, not exactly-once processing. PatchLens makes repeated delivery safe at the job and output level:
+
+| Failure | Handling |
+|---|---|
+| Duplicate webhook | Redis `SET NX` claim (provisional 5 min TTL, extended to 24 h after the job row commits); DB unique constraint on (repo, PR, head SHA) is the source of truth |
+| Job row cannot be written | Redis claim released, `503` returned so GitHub can redeliver |
+| RabbitMQ down when the webhook arrives | Job row is committed first and acts as the outbox (`publishedAt` null); `ReliabilityScheduler` republishes it |
+| Duplicate / redelivered message | `claim()` locks the row (`SELECT … FOR UPDATE`): terminal jobs and jobs with a live lease are not processed again |
+| Two workers, same job | Only one holds the lease; all later writes check the lease token |
+| Worker crash | Heartbeat stops, lease expires, scheduler republishes, a new delivery takes over; the stale worker's writes are rejected (`LeaseLostException`) |
+| Transient error | Lease released, Spring AMQP retries (3 attempts, exponential backoff), then DLQ + `DEAD_LETTER` |
+| GitHub comment fails / times out | Analysis is `COMPLETED` and the rendered comment is stored with `commentStatus=PENDING`; delivery is retried independently with backoff (`FAILED_RETRYABLE` → `DELIVERED`, or `FAILED_PERMANENT` after 6 attempts / non-retryable 4xx) without re-running the LLM |
+| POST accepted but response lost | Every attempt first searches for the job's hidden marker `<!-- patchlens:job=<id> -->` and updates instead of creating — no duplicates |
+| Newer commit pushed mid-review | Job ends `SUPERSEDED`; a comment for an outdated head is `SKIPPED_STALE` |
+| Restart | All of the above state is in PostgreSQL; the scheduler resumes pending publishes and comment deliveries |
 
 ---
 

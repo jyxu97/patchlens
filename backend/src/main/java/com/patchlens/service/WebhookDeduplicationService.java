@@ -21,7 +21,13 @@ import java.time.Duration;
 public class WebhookDeduplicationService {
 
     private static final Logger log = LoggerFactory.getLogger(WebhookDeduplicationService.class);
-    private static final Duration DEDUP_TTL = Duration.ofHours(24);
+    /** TTL once the job row is durably committed. */
+    static final Duration DEDUP_TTL = Duration.ofHours(24);
+    /**
+     * Provisional TTL between the claim and the DB commit. If the process dies in that window the
+     * key expires quickly instead of suppressing GitHub's redelivery of the event for 24 hours.
+     */
+    static final Duration PROVISIONAL_TTL = Duration.ofMinutes(5);
 
     private final RedisTemplate<String, String> redisTemplate;
 
@@ -41,11 +47,32 @@ public class WebhookDeduplicationService {
     public boolean claim(String owner, String repo, int pullNumber, String headSha) {
         try {
             String key = dedupKey(owner, repo, pullNumber, headSha);
-            Boolean result = redisTemplate.opsForValue().setIfAbsent(key, "1", DEDUP_TTL);
+            Boolean result = redisTemplate.opsForValue().setIfAbsent(key, "1", PROVISIONAL_TTL);
             return Boolean.TRUE.equals(result);
         } catch (Exception e) {
             log.warn("Redis dedup claim failed, falling back to DB constraint: {}", e.getMessage());
             return true;  // fail open
+        }
+    }
+
+    /** Extends the claim to the full TTL after the job has been committed. Best effort. */
+    public void confirm(String owner, String repo, int pullNumber, String headSha) {
+        try {
+            redisTemplate.expire(dedupKey(owner, repo, pullNumber, headSha), DEDUP_TTL);
+        } catch (Exception e) {
+            log.warn("Redis dedup confirm failed (DB constraint still deduplicates): {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Releases a claim whose job could not be created, so a redelivery of the same event is
+     * processed instead of being suppressed as a duplicate. Best effort.
+     */
+    public void release(String owner, String repo, int pullNumber, String headSha) {
+        try {
+            redisTemplate.delete(dedupKey(owner, repo, pullNumber, headSha));
+        } catch (Exception e) {
+            log.warn("Redis dedup release failed; key expires in {}: {}", PROVISIONAL_TTL, e.getMessage());
         }
     }
 

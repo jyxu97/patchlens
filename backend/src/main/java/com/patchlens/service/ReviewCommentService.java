@@ -15,11 +15,9 @@ import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
- * Formats PatchLens review findings and patches as a Markdown PR comment
- * and posts it via the GitHub Issues API.
- *
- * Posting is skipped when no GitHub token is configured — unauthenticated
- * requests cannot write comments.
+ * Formats PatchLens review findings and patches as a Markdown PR comment and delivers it via
+ * the GitHub Issues API. Rendering and delivery are separate: the rendered body is stored on the
+ * job so {@link CommentDeliveryService} can retry delivery without re-running analysis.
  *
  * The comment is intentionally advisory (no approve/reject):
  * the developer decides whether to accept, modify, or ignore each fix.
@@ -40,85 +38,61 @@ public class ReviewCommentService {
         this.githubToken = githubToken;
     }
 
-    /**
-     * Formats findings and patches as Markdown and posts (or updates) the job's review comment.
-     *
-     * <p>Idempotent per job: the comment starts with a hidden marker containing the job ID.
-     * If a comment with that marker already exists on the PR — e.g. a previous attempt posted
-     * it and then crashed before the job was marked COMPLETED — it is updated in place instead
-     * of posting a duplicate. The marker lives on GitHub, so this holds even when the crash
-     * happens between the POST and any local bookkeeping.
-     *
-     * <p>Stale-safe: if the PR head has moved past {@code headSha}, the review describes an
-     * outdated commit and is not posted; the newer commit's own job will post its review.
-     *
-     * <p>Never throws — comment failures must not fail an otherwise successful review job.
-     *
-     * @param jobId       owning review job (used as the idempotency marker)
-     * @param headSha     commit SHA this job was created for (may be null / "unknown")
-     * @param owner       GitHub repository owner
-     * @param repo        GitHub repository name
-     * @param pullNumber  PR number
-     * @param findings    detected findings (may be empty — no comment posted if so)
-     * @param patches     generated patches; may be fewer than findings (only HIGH/MEDIUM)
-     */
-    public void postReview(UUID jobId, String headSha,
-                           String owner, String repo, int pullNumber,
-                           List<ReviewFinding> findings,
-                           List<PatchSuggestion> patches) {
-        if (findings.isEmpty()) {
-            log.info("No findings for {}/{} #{} — skipping review comment", owner, repo, pullNumber);
-            return;
-        }
-        if (githubToken == null || githubToken.isBlank()) {
-            log.info("No GitHub token configured — skipping review comment for {}/{} #{}", owner, repo, pullNumber);
-            return;
-        }
+    /** True if comments can be written at all (an authenticated token is configured). */
+    public boolean canPost() {
+        return githubToken != null && !githubToken.isBlank();
+    }
 
-        try {
-            if (isStale(headSha, owner, repo, pullNumber)) {
+    /**
+     * Renders the job's review comment, starting with the hidden job marker.
+     * Empty when there is nothing to post (no findings).
+     */
+    public Optional<String> render(UUID jobId, List<ReviewFinding> findings, List<PatchSuggestion> patches) {
+        if (findings.isEmpty()) return Optional.empty();
+        return Optional.of(markerFor(jobId) + "\n" + buildComment(findings, patches));
+    }
+
+    /** Result of one delivery attempt. */
+    public sealed interface Delivery permits Delivered, SkippedStale {}
+    public record Delivered(long commentId, boolean updatedExisting) implements Delivery {}
+    public record SkippedStale(String currentHead) implements Delivery {}
+
+    /**
+     * Delivers a rendered comment: updates the job's existing comment (found by its hidden marker)
+     * or creates it. Idempotent across retries and ambiguous outcomes — if a previous POST reached
+     * GitHub but the response was lost, the marker is found and the comment updated, not duplicated.
+     *
+     * <p>Stale-safe: if the PR head moved past {@code headSha}, nothing is posted.
+     *
+     * @throws com.patchlens.exception.GitHubApiException or another runtime exception on failure —
+     *         the caller records the attempt and decides whether to retry
+     */
+    public Delivery deliver(UUID jobId, String headSha, String owner, String repo, int pullNumber, String body) {
+        if (headSha != null && !headSha.isBlank() && !"unknown".equals(headSha)) {
+            Optional<String> current = gitHubService.fetchHeadSha(owner, repo, pullNumber);
+            if (current.isPresent() && !current.get().equals(headSha)) {
                 log.info("PR {}/{} #{} head moved past {} — skipping stale review comment for job {}",
                         owner, repo, pullNumber, headSha, jobId);
-                return;
+                return new SkippedStale(current.get());
             }
-
-            String marker = markerFor(jobId);
-            String body = marker + "\n" + buildComment(findings, patches);
-
-            Optional<GitHubService.IssueComment> existing = gitHubService
-                    .listPrComments(owner, repo, pullNumber).stream()
-                    .filter(c -> c.body() != null && c.body().contains(marker))
-                    .findFirst();
-
-            if (existing.isPresent()) {
-                gitHubService.updatePrComment(owner, repo, existing.get().id(), body);
-            } else {
-                gitHubService.postPrComment(owner, repo, pullNumber, body);
-            }
-        } catch (Exception e) {
-            // If we can't verify whether a comment already exists, skip rather than risk a duplicate.
-            log.warn("Could not post review comment for job {} on {}/{} #{}: {}",
-                    jobId, owner, repo, pullNumber, e.getMessage());
         }
+
+        String marker = markerFor(jobId);
+        Optional<GitHubService.IssueComment> existing = gitHubService
+                .listPrComments(owner, repo, pullNumber).stream()
+                .filter(c -> c.body() != null && c.body().contains(marker))
+                .findFirst();
+
+        if (existing.isPresent()) {
+            gitHubService.updatePrComment(owner, repo, existing.get().id(), body);
+            return new Delivered(existing.get().id(), true);
+        }
+        return new Delivered(gitHubService.createPrComment(owner, repo, pullNumber, body), false);
     }
 
     /** Hidden HTML marker identifying the comment owned by a review job. */
     static String markerFor(UUID jobId) {
         return "<!-- patchlens:job=" + jobId + " -->";
-    }
-
-    /**
-     * True if the PR's current head differs from the commit this job reviewed.
-     * Unknown SHAs (manual triggers, malformed payloads) can't be compared, so they are
-     * treated as not stale.
-     */
-    private boolean isStale(String headSha, String owner, String repo, int pullNumber) {
-        if (headSha == null || headSha.isBlank() || "unknown".equals(headSha)) {
-            return false;
-        }
-        return gitHubService.fetchHeadSha(owner, repo, pullNumber)
-                .map(current -> !current.equals(headSha))
-                .orElse(false);
     }
 
     // =====================================================================

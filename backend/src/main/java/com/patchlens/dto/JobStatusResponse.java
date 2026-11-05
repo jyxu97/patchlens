@@ -1,5 +1,6 @@
 package com.patchlens.dto;
 
+import com.patchlens.model.CommentStatus;
 import com.patchlens.model.JobStatus;
 
 import java.time.Instant;
@@ -14,5 +15,7 @@ public record JobStatusResponse(
         Instant createdAt,
         Instant updatedAt,
         String result,
-        String errorMessage
+        String errorMessage,
+        CommentStatus commentStatus,
+        String commentError
 ) {}

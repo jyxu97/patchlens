@@ -75,6 +75,49 @@ public class ReviewJob {
     @Column(name = "completed_at")
     private Instant completedAt;
 
+    // ---- worker lease (atomic ownership; nullable for in-place schema upgrade) ----
+
+    /** Opaque token of the delivery currently processing the job; null when unowned. */
+    @Column(name = "lease_owner")
+    private String leaseOwner;
+
+    @Column(name = "lease_expires_at")
+    private Instant leaseExpiresAt;
+
+    // ---- transactional outbox ----
+
+    /** Last time a ReviewJobMessage for this job was handed to RabbitMQ; null = never published. */
+    @Column(name = "published_at")
+    private Instant publishedAt;
+
+    @Column(name = "publish_attempts")
+    private Integer publishAttempts;
+
+    // ---- GitHub comment delivery (independent of analysis status) ----
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "comment_status")
+    private CommentStatus commentStatus;
+
+    /** Rendered comment (with the hidden job marker), so delivery can be retried without re-analysis. */
+    @Column(name = "comment_body", columnDefinition = "TEXT")
+    private String commentBody;
+
+    @Column(name = "comment_id")
+    private Long commentId;
+
+    @Column(name = "comment_attempts")
+    private Integer commentAttempts;
+
+    @Column(name = "comment_last_error", columnDefinition = "TEXT")
+    private String commentLastError;
+
+    @Column(name = "comment_next_attempt_at")
+    private Instant commentNextAttemptAt;
+
+    @Column(name = "comment_lease_until")
+    private Instant commentLeaseUntil;
+
     @PrePersist
     protected void onCreate() {
         createdAt = Instant.now();
@@ -122,4 +165,28 @@ public class ReviewJob {
     public void setAttemptCount(int attemptCount) { this.attemptCount = attemptCount; }
     public void setCompletedAt(Instant completedAt) { this.completedAt = completedAt; }
     public void setFindingCount(int findingCount) { this.findingCount = findingCount; }
+
+    public String getLeaseOwner()              { return leaseOwner; }
+    public Instant getLeaseExpiresAt()         { return leaseExpiresAt; }
+    public Instant getPublishedAt()            { return publishedAt; }
+    public int getPublishAttempts()            { return publishAttempts == null ? 0 : publishAttempts; }
+    public CommentStatus getCommentStatus()    { return commentStatus; }
+    public String getCommentBody()             { return commentBody; }
+    public Long getCommentId()                 { return commentId; }
+    public int getCommentAttempts()            { return commentAttempts == null ? 0 : commentAttempts; }
+    public String getCommentLastError()        { return commentLastError; }
+    public Instant getCommentNextAttemptAt()   { return commentNextAttemptAt; }
+    public Instant getCommentLeaseUntil()      { return commentLeaseUntil; }
+
+    public void setLease(String owner, Instant expiresAt) { this.leaseOwner = owner; this.leaseExpiresAt = expiresAt; }
+    public void clearLease()                               { this.leaseOwner = null; this.leaseExpiresAt = null; }
+    public void setPublishedAt(Instant t)                  { this.publishedAt = t; }
+    public void setPublishAttempts(int n)                  { this.publishAttempts = n; }
+    public void setCommentStatus(CommentStatus s)          { this.commentStatus = s; }
+    public void setCommentBody(String b)                   { this.commentBody = b; }
+    public void setCommentId(Long id)                      { this.commentId = id; }
+    public void setCommentAttempts(int n)                  { this.commentAttempts = n; }
+    public void setCommentLastError(String e)              { this.commentLastError = e; }
+    public void setCommentNextAttemptAt(Instant t)         { this.commentNextAttemptAt = t; }
+    public void setCommentLeaseUntil(Instant t)            { this.commentLeaseUntil = t; }
 }

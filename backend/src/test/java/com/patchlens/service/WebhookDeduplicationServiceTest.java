@@ -12,6 +12,8 @@ import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -32,7 +34,7 @@ class WebhookDeduplicationServiceTest {
 
     @BeforeEach
     void setUp() {
-        when(redisTemplate.opsForValue()).thenReturn(valueOps);
+        lenient().when(redisTemplate.opsForValue()).thenReturn(valueOps);
         service = new WebhookDeduplicationService(redisTemplate);
     }
 
@@ -77,5 +79,30 @@ class WebhookDeduplicationServiceTest {
     void dedupKey_hasExpectedFormat() {
         String key = WebhookDeduplicationService.dedupKey(OWNER, REPO, PR_NUM, SHA);
         assertThat(key).isEqualTo("patchlens:dedup:acme:backend:42:" + SHA);
+    }
+
+    @Test
+    void claimIsProvisionalUntilTheJobIsCommitted() {
+        when(valueOps.setIfAbsent(anyString(), eq("1"), any(Duration.class))).thenReturn(true);
+        service.claim(OWNER, REPO, PR_NUM, SHA);
+        verify(valueOps).setIfAbsent(anyString(), eq("1"), eq(WebhookDeduplicationService.PROVISIONAL_TTL));
+
+        service.confirm(OWNER, REPO, PR_NUM, SHA);
+        verify(redisTemplate).expire(WebhookDeduplicationService.dedupKey(OWNER, REPO, PR_NUM, SHA),
+                WebhookDeduplicationService.DEDUP_TTL);
+    }
+
+    @Test
+    void releaseDeletesTheClaimSoARedeliveryIsProcessed() {
+        service.release(OWNER, REPO, PR_NUM, SHA);
+        verify(redisTemplate).delete(WebhookDeduplicationService.dedupKey(OWNER, REPO, PR_NUM, SHA));
+    }
+
+    @Test
+    void releaseAndConfirmTolerateRedisOutage() {
+        when(redisTemplate.delete(anyString())).thenThrow(new RuntimeException("down"));
+        when(redisTemplate.expire(anyString(), any(Duration.class))).thenThrow(new RuntimeException("down"));
+        service.release(OWNER, REPO, PR_NUM, SHA);
+        service.confirm(OWNER, REPO, PR_NUM, SHA);
     }
 }

@@ -1,13 +1,10 @@
 package com.patchlens.service;
 
 import com.patchlens.exception.GitHubApiException;
-import com.patchlens.model.FindingCategory;
-import com.patchlens.model.FindingSeverity;
-import com.patchlens.model.ReviewFinding;
+import com.patchlens.model.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -16,12 +13,12 @@ import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
- * Verifies that posting a review comment is safe under redelivery / retry:
+ * Rendering and idempotent delivery of the job's review comment:
  * one comment per job (updated in place on repeat), and no comment for a stale commit.
  */
 @ExtendWith(MockitoExtension.class)
@@ -39,6 +36,7 @@ class ReviewCommentServiceTest {
 
     private ReviewCommentService service;
     private List<ReviewFinding> findings;
+    private String body;
 
     @BeforeEach
     void setUp() {
@@ -47,19 +45,40 @@ class ReviewCommentServiceTest {
                 JOB_ID, "src/Foo.java", 10, 12,
                 FindingCategory.CORRECTNESS, FindingSeverity.HIGH,
                 "Null dereference", "x may be null", 0.9, null));
+        body = service.render(JOB_ID, findings, List.of()).orElseThrow();
     }
 
     @Test
-    void firstAttempt_postsNewCommentWithJobMarker() {
+    void renderStartsWithJobMarker_andIsEmptyWithoutFindings() {
+        assertThat(body).startsWith(ReviewCommentService.markerFor(JOB_ID));
+        assertThat(service.render(JOB_ID, List.of(), List.of())).isEmpty();
+    }
+
+    @Test
+    void onlySandboxValidatedPatchesArePresentedAsFixes() {
+        // findings and patches are unsaved here, so both ids are null and still join up
+        PatchSuggestion failed = new PatchSuggestion(null, "--- a/src/Foo.java\n+++ b/src/Foo.java\n@@ -1 +1 @@\n-a\n+b", "r");
+        failed.setStatus(ValidationStatus.REJECTED_TEST);
+        PatchSuggestion unvalidated = new PatchSuggestion(null, failed.getPatchText(), "r");
+        unvalidated.setStatus(ValidationStatus.NOT_VALIDATED);
+
+        String failedBody = service.render(JOB_ID, findings, List.of(failed)).orElseThrow();
+        assertThat(failedBody).contains("Unverified patch").contains("Tests failed").doesNotContain("Suggested patch (validated");
+
+        String unvalidatedBody = service.render(JOB_ID, findings, List.of(unvalidated)).orElseThrow();
+        assertThat(unvalidatedBody).contains("Unverified patch").contains("Not validated");
+    }
+
+    @Test
+    void firstAttempt_createsCommentWithJobMarker() {
         when(gitHubService.fetchHeadSha(OWNER, REPO, PR_NUM)).thenReturn(Optional.of(SHA));
         when(gitHubService.listPrComments(OWNER, REPO, PR_NUM)).thenReturn(List.of(
                 new GitHubService.IssueComment(1L, "LGTM from a human")));
+        when(gitHubService.createPrComment(OWNER, REPO, PR_NUM, body)).thenReturn(77L);
 
-        service.postReview(JOB_ID, SHA, OWNER, REPO, PR_NUM, findings, List.of());
+        var d = service.deliver(JOB_ID, SHA, OWNER, REPO, PR_NUM, body);
 
-        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
-        verify(gitHubService).postPrComment(eq(OWNER), eq(REPO), eq(PR_NUM), body.capture());
-        assertThat(body.getValue()).startsWith(ReviewCommentService.markerFor(JOB_ID));
+        assertThat(d).isEqualTo(new ReviewCommentService.Delivered(77L, false));
         verify(gitHubService, never()).updatePrComment(any(), any(), anyLong(), any());
     }
 
@@ -70,10 +89,11 @@ class ReviewCommentServiceTest {
                 new GitHubService.IssueComment(1L, "LGTM from a human"),
                 new GitHubService.IssueComment(99L, ReviewCommentService.markerFor(JOB_ID) + "\nold body")));
 
-        service.postReview(JOB_ID, SHA, OWNER, REPO, PR_NUM, findings, List.of());
+        var d = service.deliver(JOB_ID, SHA, OWNER, REPO, PR_NUM, body);
 
-        verify(gitHubService).updatePrComment(eq(OWNER), eq(REPO), eq(99L), anyString());
-        verify(gitHubService, never()).postPrComment(any(), any(), anyInt(), any());
+        assertThat(d).isEqualTo(new ReviewCommentService.Delivered(99L, true));
+        verify(gitHubService).updatePrComment(OWNER, REPO, 99L, body);
+        verify(gitHubService, never()).createPrComment(any(), any(), anyInt(), any());
     }
 
     @Test
@@ -82,10 +102,10 @@ class ReviewCommentServiceTest {
         when(gitHubService.fetchHeadSha(OWNER, REPO, PR_NUM)).thenReturn(Optional.of(SHA));
         when(gitHubService.listPrComments(OWNER, REPO, PR_NUM)).thenReturn(List.of(
                 new GitHubService.IssueComment(7L, ReviewCommentService.markerFor(otherJob) + "\nbody")));
+        when(gitHubService.createPrComment(OWNER, REPO, PR_NUM, body)).thenReturn(8L);
 
-        service.postReview(JOB_ID, SHA, OWNER, REPO, PR_NUM, findings, List.of());
+        service.deliver(JOB_ID, SHA, OWNER, REPO, PR_NUM, body);
 
-        verify(gitHubService).postPrComment(eq(OWNER), eq(REPO), eq(PR_NUM), anyString());
         verify(gitHubService, never()).updatePrComment(any(), any(), anyLong(), any());
     }
 
@@ -93,31 +113,31 @@ class ReviewCommentServiceTest {
     void headMovedToNewerCommit_skipsStaleComment() {
         when(gitHubService.fetchHeadSha(OWNER, REPO, PR_NUM)).thenReturn(Optional.of(NEW_SHA));
 
-        service.postReview(JOB_ID, SHA, OWNER, REPO, PR_NUM, findings, List.of());
+        var d = service.deliver(JOB_ID, SHA, OWNER, REPO, PR_NUM, body);
 
+        assertThat(d).isEqualTo(new ReviewCommentService.SkippedStale(NEW_SHA));
         verify(gitHubService, never()).listPrComments(any(), any(), anyInt());
-        verify(gitHubService, never()).postPrComment(any(), any(), anyInt(), any());
-        verify(gitHubService, never()).updatePrComment(any(), any(), anyLong(), any());
+        verify(gitHubService, never()).createPrComment(any(), any(), anyInt(), any());
     }
 
     @Test
     void unknownHeadSha_skipsStalenessCheck() {
         when(gitHubService.listPrComments(OWNER, REPO, PR_NUM)).thenReturn(List.of());
+        when(gitHubService.createPrComment(OWNER, REPO, PR_NUM, body)).thenReturn(5L);
 
-        service.postReview(JOB_ID, "unknown", OWNER, REPO, PR_NUM, findings, List.of());
+        service.deliver(JOB_ID, "unknown", OWNER, REPO, PR_NUM, body);
 
         verify(gitHubService, never()).fetchHeadSha(any(), any(), anyInt());
-        verify(gitHubService).postPrComment(eq(OWNER), eq(REPO), eq(PR_NUM), anyString());
     }
 
     @Test
-    void cannotListComments_skipsPostingAndDoesNotThrow() {
+    void cannotListComments_throwsSoTheDurableRetryHandlesIt_andNothingIsPosted() {
         when(gitHubService.fetchHeadSha(OWNER, REPO, PR_NUM)).thenReturn(Optional.of(SHA));
         when(gitHubService.listPrComments(OWNER, REPO, PR_NUM))
-                .thenThrow(new GitHubApiException("GITHUB_API_ERROR", "boom"));
+                .thenThrow(new GitHubApiException("GITHUB_API_ERROR", "boom", 502));
 
-        assertThatCode(() -> service.postReview(JOB_ID, SHA, OWNER, REPO, PR_NUM, findings, List.of()))
-                .doesNotThrowAnyException();
-        verify(gitHubService, never()).postPrComment(any(), any(), anyInt(), any());
+        assertThatThrownBy(() -> service.deliver(JOB_ID, SHA, OWNER, REPO, PR_NUM, body))
+                .isInstanceOf(GitHubApiException.class);
+        verify(gitHubService, never()).createPrComment(any(), any(), anyInt(), any());
     }
 }

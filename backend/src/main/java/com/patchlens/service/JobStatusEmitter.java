@@ -50,7 +50,9 @@ public class JobStatusEmitter {
                 job.getCreatedAt(),
                 job.getUpdatedAt(),
                 job.getResultJson(),
-                job.getErrorMessage()
+                job.getErrorMessage(),
+                job.getCommentStatus(),
+                job.getCommentLastError()
         );
 
         try {

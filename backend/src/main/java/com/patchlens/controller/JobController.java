@@ -61,7 +61,9 @@ public class JobController {
                 job.getCreatedAt(),
                 job.getUpdatedAt(),
                 job.getResultJson(),
-                job.getErrorMessage()
+                job.getErrorMessage(),
+                job.getCommentStatus(),
+                job.getCommentLastError()
         );
     }
 }
