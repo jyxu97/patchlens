@@ -43,7 +43,7 @@ class ReviewJobStartProcessingTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = JobStatus.class, names = {"COMPLETED", "DEAD_LETTER"})
+    @EnumSource(value = JobStatus.class, names = {"COMPLETED", "DEAD_LETTER", "SUPERSEDED"})
     void terminalJob_isNotClaimed(JobStatus status) {
         ReviewJob job = jobIn(status);
         when(repository.findById(JOB_ID)).thenReturn(Optional.of(job));
@@ -57,7 +57,7 @@ class ReviewJobStartProcessingTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = JobStatus.class, names = {"COMPLETED", "DEAD_LETTER"}, mode = EnumSource.Mode.EXCLUDE)
+    @EnumSource(value = JobStatus.class, names = {"COMPLETED", "DEAD_LETTER", "SUPERSEDED"}, mode = EnumSource.Mode.EXCLUDE)
     void nonTerminalJob_isClaimedAndAttemptCounted(JobStatus status) {
         ReviewJob job = jobIn(status);
         when(repository.findById(JOB_ID)).thenReturn(Optional.of(job));

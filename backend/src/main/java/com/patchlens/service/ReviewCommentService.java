@@ -169,7 +169,11 @@ public class ReviewCommentService {
         if (patch != null) {
             String patchText = patch.getPatchText();
             if (patchText != null && !patchText.isBlank()) {
-                sb.append("<details>\n<summary>Suggested patch</summary>\n\n");
+                // Only a sandbox-validated patch is presented as a suggested fix.
+                String summary = patch.getStatus() == ValidationStatus.VALIDATED
+                        ? "Suggested patch (validated in sandbox)"
+                        : "Unverified patch — did not pass validation, do not apply as-is";
+                sb.append("<details>\n<summary>").append(summary).append("</summary>\n\n");
                 sb.append("```diff\n");
                 sb.append(truncateLines(patchText, MAX_PATCH_PREVIEW_LINES));
                 sb.append("\n```\n\n");
@@ -188,14 +192,16 @@ public class ReviewCommentService {
         sb.append("---\n\n");
     }
 
-    private String validationLabel(ValidationStatus status) {
+    static String validationLabel(ValidationStatus status) {
         return switch (status) {
-            case VALIDATED               -> "✅ Policy: PASS";
-            case REJECTED_PATCH_APPLY    -> "❌ Patch did not apply";
+            case VALIDATED               -> "✅ Applied, compiled and passed tests in sandbox";
+            case REJECTED_PATCH_APPLY    -> "❌ Patch did not apply to the reviewed commit";
             case REJECTED_COMPILE        -> "❌ Compile failed";
-            case REJECTED_STATIC_ANALYSIS -> "⚠️ Static analysis failed";
+            case REJECTED_STATIC_ANALYSIS -> "❌ Static analysis failed";
             case REJECTED_TEST           -> "❌ Tests failed";
-            case REJECTED_POLICY         -> "⚠️ Policy: REJECTED (format/size)";
+            case REJECTED_POLICY         -> "❌ Rejected by patch policy (format/scope/size)";
+            case NOT_VALIDATED           -> "⚪ Not validated — sandbox unavailable";
+            case VALIDATION_ERROR        -> "⚠️ Validation could not run (infrastructure error)";
             case PENDING                 -> "⏳ Pending validation";
         };
     }

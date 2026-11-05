@@ -99,7 +99,8 @@ public class ReviewJobService {
     @Transactional
     public Optional<ReviewJob> startProcessing(UUID jobId) {
         ReviewJob job = findOrThrow(jobId);
-        if (job.getStatus() == JobStatus.COMPLETED || job.getStatus() == JobStatus.DEAD_LETTER) {
+        if (job.getStatus() == JobStatus.COMPLETED || job.getStatus() == JobStatus.DEAD_LETTER
+                || job.getStatus() == JobStatus.SUPERSEDED) {
             return Optional.empty();
         }
         job.setStatus(JobStatus.PROCESSING);
@@ -190,6 +191,21 @@ public class ReviewJobService {
         ReviewJob job = findOrThrow(jobId);
         job.setStatus(JobStatus.DEAD_LETTER);
         job.setErrorMessage(errorMessage);
+        job.setCompletedAt(Instant.now());
+        ReviewJob saved = repository.save(job);
+        emitter.emit(saved);
+        return saved;
+    }
+
+    /**
+     * Transitions the job to SUPERSEDED: a newer commit was pushed while it ran, so its results
+     * would describe code that is no longer the PR head. Terminal; no comment is posted.
+     */
+    @Transactional
+    public ReviewJob markSuperseded(UUID jobId, String reason) {
+        ReviewJob job = findOrThrow(jobId);
+        job.setStatus(JobStatus.SUPERSEDED);
+        job.setErrorMessage(reason);
         job.setCompletedAt(Instant.now());
         ReviewJob saved = repository.save(job);
         emitter.emit(saved);

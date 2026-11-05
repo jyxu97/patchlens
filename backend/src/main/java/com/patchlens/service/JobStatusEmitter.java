@@ -72,7 +72,7 @@ public class JobStatusEmitter {
 
     private boolean isTerminal(ReviewJob job) {
         return switch (job.getStatus()) {
-            case COMPLETED, FAILED, DEAD_LETTER -> true;
+            case COMPLETED, FAILED, DEAD_LETTER, SUPERSEDED -> true;
             default -> false;
         };
     }

@@ -19,7 +19,7 @@ Live demo: [patchlens-alpha.vercel.app](https://patchlens-alpha.vercel.app)
 - **Redis deduplication and caching** — `SET NX` atomic gate suppresses duplicate webhook deliveries; diff-hash caching skips LLM calls for unchanged PRs
 - **Offline evaluation harness** — runs the full pipeline against built-in sample PRs and computes precision, recall, patch apply rate, compile success rate, and test pass rate
 - **Full observability** — every run logs GitHub API, retrieval, and LLM latency, token usage, grounding rate, finding count, and validation outcomes to PostgreSQL
-- **Mock AI mode** — returns fixture results without any API or Docker calls, for local development and CI
+- **Mock AI mode** — returns fixture results without any OpenAI calls, for local development and CI (mock patches are never reported as validated)
 
 ---
 
@@ -103,12 +103,17 @@ JobStatusEmitter  SSE push to client  PENDING → PROCESSING → COMPLETED
    - On cache miss: scores files deterministically, retrieves top-k context chunks from pgvector, calls LangChain4j `ReviewAiService` with versioned prompts, applies deterministic filter to raw findings
    - Persists `ReviewFinding` entities
 
-   **Stage 2 — Patch generation + validation**
-   - For each HIGH/MEDIUM finding: calls `PatchAiService` to generate a unified diff
-   - Validates patch format and size (starts with `---`, max 200 lines, references a PR file)
-   - Runs the patch inside a Docker container against the PR's base content; records compile and test outcomes
-   - On failure: feeds error output back to `RepairAiService` for up to 2 repair attempts
-   - Persists `PatchSuggestion` and `PatchValidation` entities
+   **Stage 2 — Patch generation (`GENERATING_PATCHES`)**
+   - For each HIGH/MEDIUM finding: calls `PatchAiService` to generate a unified diff (persisted as `PENDING`)
+
+   **Stage 3 — Sandbox validation + bounded repair (`VALIDATING_PATCHES`)**
+   - Deterministic patch policy: parseable unified diff, ≤200 lines, only the finding's file, no protected build/CI files, no path traversal
+   - Materialises a fresh snapshot of the repository at the **pinned PR head SHA** (GitHub tarball, extracted in-process), loads `patchlens.yaml` from the pristine tree, applies the patch in-process
+   - Prefetches dependencies (network on, build descriptors only), then runs compile → optional static analysis → tests in Docker with networking disabled
+   - Repairable failures (policy, apply, compile, static analysis, tests) are fed back to `RepairAiService`; at most 2 repairs, each validated in a new, clean workspace
+   - Every attempt is persisted as a `PatchValidation` row (status, failing step, error output, patch text, revision)
+   - `VALIDATED` means the patch applied and every configured check that ran passed. If Docker is unavailable the patch is `NOT_VALIDATED`; infrastructure failures are `VALIDATION_ERROR` — neither is ever shown as a fix
+   - If the PR head moves while the job runs, the job ends as `SUPERSEDED` and the newer commit's job reviews it
 
    **Stage 3 — GitHub comment**
    - Formats all findings and patches as a Markdown comment
@@ -130,16 +135,24 @@ Place this file in the root of the target repository to control how the Docker s
 
 ```yaml
 language: java
+buildFile: pom.xml
 build:
-  command: "./mvnw -q -DskipTests test-compile"
+  command: "mvn -q -DskipTests test-compile"
+staticAnalysis:
+  command: ""            # blank = step disabled (default)
 tests:
-  command: "./mvnw -q test"
+  command: "mvn -q test"
 timeouts:
-  compile_seconds: 120
-  test_seconds: 300
+  compileSeconds: 300
+  staticAnalysisSeconds: 120
+  testSeconds: 300
 ```
 
-If the file is absent, PatchLens uses these defaults. The `staticAnalysis.command` field is optional; leave it blank to skip that step.
+If the file is absent, PatchLens uses these defaults. Commands run inside the sandbox container (`sh -c`, network disabled); the sandbox injects Maven offline mode and the dependency-cache layout via `MAVEN_ARGS`, so don't pass `-o` or `-Dmaven.repo.local`. The file is read from the pristine snapshot, parsed with SnakeYAML's safe constructor, and timeouts are capped by `patchlens.sandbox.max-step-seconds`.
+
+**Sandbox isolation** (`DockerSandboxExecutor`): `--network none`, non-root user, `--cap-drop ALL`, `no-new-privileges`, read-only root filesystem with a size-limited `/tmp` tmpfs, CPU/memory/PID limits, hard wall-clock timeout that kills the container, only the disposable workspace, scratch dir and a read-only dependency cache mounted (never the Docker socket), no host environment forwarded.
+
+**Running the sandbox:** the backend needs a Docker CLI that can reach a daemon, and the sandbox work directory must be a path the daemon can bind-mount. Run the backend on the host (`./mvnw spring-boot:run`) for real validation; the Docker Compose `backend` container has no Docker CLI, so it records patches as `NOT_VALIDATED`. Set `SANDBOX_ENABLED=false` to disable the sandbox explicitly.
 
 ---
 
@@ -166,7 +179,7 @@ CORS_ALLOWED_ORIGINS=http://localhost:5173
 ```
 
 - `GITHUB_TOKEN` is optional for public repos but increases the rate limit and is required for posting PR review comments
-- Set `AI_MODE=mock` to skip all OpenAI and Docker calls during development
+- Set `AI_MODE=mock` to skip all OpenAI calls during development (sandbox validation still runs if Docker is available; mock patches will fail it, as they should)
 
 ### 3. Start backend services
 

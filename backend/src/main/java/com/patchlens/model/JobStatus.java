@@ -8,5 +8,7 @@ public enum JobStatus {
     VALIDATING_PATCHES,
     COMPLETED,
     FAILED,
-    DEAD_LETTER
+    DEAD_LETTER,
+    /** A newer commit was pushed while this job ran; the newer commit's job supersedes it. */
+    SUPERSEDED
 }

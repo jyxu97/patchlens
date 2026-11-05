@@ -5,6 +5,8 @@ import com.patchlens.ai.RepairAiService;
 import com.patchlens.ai.dto.PatchProposal;
 import com.patchlens.model.*;
 import com.patchlens.repository.PatchSuggestionRepository;
+import com.patchlens.sandbox.PatchPolicy;
+import com.patchlens.util.Redactor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -12,13 +14,12 @@ import org.springframework.stereotype.Service;
 import java.util.*;
 
 /**
- * Generates unified diff patch suggestions for HIGH and MEDIUM severity findings.
+ * Model-facing half of the patch pipeline: generates candidate unified diffs for eligible
+ * findings and produces repaired candidates from validation feedback.
  *
- * For each eligible finding:
- *   1. Calls PatchAiService (LangChain4j) or OpenAIService.generatePatch() (legacy mock)
- *   2. Validates the patch output (format, size, allowed files)
- *   3. Initiates repair loop (up to MAX_REPAIR_ATTEMPTS) using RepairAiService on failure
- *   4. Saves a PatchSuggestion entity
+ * <p>This class never decides whether a patch is valid. Every candidate is persisted as
+ * {@link ValidationStatus#PENDING}; {@link PatchPipelineService} runs policy and sandbox
+ * validation and owns the bounded repair loop.
  */
 @Service
 public class PatchGenerationService {
@@ -26,14 +27,11 @@ public class PatchGenerationService {
     private static final Logger log = LoggerFactory.getLogger(PatchGenerationService.class);
 
     /** Only generate patches for findings at or above this severity. */
-    private static final Set<FindingSeverity> PATCH_ELIGIBLE_SEVERITIES =
+    static final Set<FindingSeverity> PATCH_ELIGIBLE_SEVERITIES =
             Set.of(FindingSeverity.HIGH, FindingSeverity.MEDIUM);
 
-    /** Unified diff must not exceed this many lines. */
-    private static final int MAX_PATCH_LINES = 200;
-
     /** Maximum repair iterations per finding (beyond the initial attempt). */
-    static final int MAX_REPAIR_ATTEMPTS = 2;
+    public static final int MAX_REPAIR_ATTEMPTS = 2;
 
     private final OpenAIService openAIService;
     private final Optional<PatchAiService> patchAiService;
@@ -50,116 +48,69 @@ public class PatchGenerationService {
         this.patchSuggestionRepository = patchSuggestionRepository;
     }
 
+    public static boolean isEligible(ReviewFinding finding) {
+        return PATCH_ELIGIBLE_SEVERITIES.contains(finding.getSeverity());
+    }
+
+    /** A finding paired with its initial candidate patch (status PENDING). */
+    public record Candidate(ReviewFinding finding, PatchSuggestion patch) {}
+
     /**
-     * Generates patch suggestions for all eligible findings in the given list.
-     *
-     * @param findings     detected findings for this PR
-     * @param changedFiles changed files from GitHub (used to find the matching diff)
-     * @param contextChunks RAG context for the overall PR
-     * @return persisted PatchSuggestion entities
+     * Generates one initial candidate per eligible (HIGH/MEDIUM) finding whose file is part of
+     * the PR. A model failure for one finding is logged and skipped; it does not fail the job.
      */
-    public List<PatchSuggestion> generatePatches(List<ReviewFinding> findings,
-                                                  List<ChangedFile> changedFiles,
-                                                  List<String> contextChunks) {
-        Set<String> allowedFiles = new HashSet<>();
+    public List<Candidate> generateCandidates(List<ReviewFinding> findings,
+                                              List<ChangedFile> changedFiles,
+                                              List<String> contextChunks) {
         Map<String, ChangedFile> fileByName = new HashMap<>();
-        for (ChangedFile cf : changedFiles) {
-            allowedFiles.add(cf.filename());
-            fileByName.put(cf.filename(), cf);
-        }
+        for (ChangedFile cf : changedFiles) fileByName.put(cf.filename(), cf);
 
-        List<PatchSuggestion> result = new ArrayList<>();
-
+        List<Candidate> result = new ArrayList<>();
         for (ReviewFinding finding : findings) {
-            if (!PATCH_ELIGIBLE_SEVERITIES.contains(finding.getSeverity())) continue;
-
+            if (!isEligible(finding)) continue;
             ChangedFile targetFile = fileByName.get(finding.getFilePath());
             if (targetFile == null) {
                 log.warn("Skipping patch for finding {} — file {} not in changed files",
                         finding.getId(), finding.getFilePath());
                 continue;
             }
-
-            PatchSuggestion patch = tryGenerate(finding, targetFile, contextChunks, allowedFiles);
-            if (patch != null) {
-                result.add(patch);
-            }
+            generateCandidate(finding, targetFile, contextChunks)
+                    .ifPresent(p -> result.add(new Candidate(finding, p)));
         }
-
         return result;
     }
 
-    /**
-     * Generates a patch for one finding, validates it, and persists it.
-     * Returns null if generation fails after all repair attempts.
-     */
-    private PatchSuggestion tryGenerate(ReviewFinding finding,
-                                         ChangedFile targetFile,
-                                         List<String> contextChunks,
-                                         Set<String> allowedFiles) {
-        // Step 1 — Generate initial patch
-        OpenAIService.PatchOutput output = callGeneratePatch(finding, targetFile, contextChunks);
-        PatchSuggestion patch = new PatchSuggestion(finding.getId(), output.unifiedDiff(), output.rationale());
-        patch = patchSuggestionRepository.save(patch);
-
-        String validationError = validatePatch(output.unifiedDiff(), finding.getFilePath(), allowedFiles);
-        if (validationError == null) {
-            patch.setStatus(ValidationStatus.VALIDATED);
-            return patchSuggestionRepository.save(patch);
+    /** Generates and persists the initial candidate for one finding (status PENDING). */
+    public Optional<PatchSuggestion> generateCandidate(ReviewFinding finding,
+                                                       ChangedFile targetFile,
+                                                       List<String> contextChunks) {
+        try {
+            OpenAIService.PatchOutput output = callGeneratePatch(finding, targetFile, contextChunks);
+            String text = output.unifiedDiff() == null ? "" : output.unifiedDiff();
+            PatchSuggestion patch = new PatchSuggestion(finding.getId(), text, output.rationale());
+            return Optional.of(patchSuggestionRepository.save(patch));
+        } catch (RuntimeException e) {
+            log.warn("Patch generation failed for finding {}: {}", finding.getId(), Redactor.redact(e.getMessage()));
+            return Optional.empty();
         }
-
-        // Bounded repair loop
-        for (int attempt = 1; attempt <= MAX_REPAIR_ATTEMPTS; attempt++) {
-            log.info("Repair attempt {}/{} for finding {}: {}", attempt, MAX_REPAIR_ATTEMPTS,
-                    finding.getId(), validationError);
-
-            patch.setRepairAttempts(attempt);
-            patch = patchSuggestionRepository.save(patch);
-
-            OpenAIService.PatchOutput repaired = callRepairPatch(finding, patch, validationError);
-            patch.setPatchText(repaired.unifiedDiff());
-            patch.setRationale(repaired.rationale());
-            patch = patchSuggestionRepository.save(patch);
-
-            validationError = validatePatch(repaired.unifiedDiff(), finding.getFilePath(), allowedFiles);
-            if (validationError == null) {
-                patch.setStatus(ValidationStatus.VALIDATED);
-                return patchSuggestionRepository.save(patch);
-            }
-        }
-
-        patch.setStatus(ValidationStatus.REJECTED_POLICY);
-        patchSuggestionRepository.save(patch);
-        return null;
     }
 
     /**
-     * Generates a single patch for one finding with no repair loop.
-     * Used by the eval harness to control initial vs repair validation separately.
+     * Asks the repair model for a replacement patch given the previous attempt's failure.
+     * Increments {@code repairAttempts} and resets the status to PENDING (the new text has not
+     * been validated yet).
      *
-     * @return saved PatchSuggestion (status PENDING — caller must validate and update)
+     * @throws IllegalStateException if the repair budget is already exhausted
      */
-    public PatchSuggestion generateSinglePatch(ReviewFinding finding,
-                                                ChangedFile targetFile,
-                                                List<String> contextChunks) {
-        OpenAIService.PatchOutput output = callGeneratePatch(finding, targetFile, contextChunks);
-        PatchSuggestion patch = new PatchSuggestion(finding.getId(), output.unifiedDiff(), output.rationale());
-        return patchSuggestionRepository.save(patch);
-    }
-
-    /**
-     * Generates a repaired patch based on the validation error from the previous attempt.
-     * Used by the eval harness after an initial patch fails Docker validation.
-     *
-     * @return saved PatchSuggestion with incremented repairAttempts (status PENDING)
-     */
-    public PatchSuggestion repairSinglePatch(ReviewFinding finding,
-                                              PatchSuggestion previous,
-                                              String validationError) {
-        OpenAIService.PatchOutput repaired = callRepairPatch(finding, previous, validationError);
-        previous.setPatchText(repaired.unifiedDiff());
+    public PatchSuggestion repair(ReviewFinding finding, PatchSuggestion previous, String failureFeedback) {
+        if (previous.getRepairAttempts() >= MAX_REPAIR_ATTEMPTS) {
+            throw new IllegalStateException("Repair budget exhausted for patch " + previous.getId());
+        }
+        OpenAIService.PatchOutput repaired = callRepairPatch(finding, previous, failureFeedback);
+        previous.setPatchText(repaired.unifiedDiff() == null ? "" : repaired.unifiedDiff());
         previous.setRationale(repaired.rationale());
         previous.setRepairAttempts(previous.getRepairAttempts() + 1);
+        previous.setStatus(ValidationStatus.PENDING);
         return patchSuggestionRepository.save(previous);
     }
 
@@ -176,7 +127,7 @@ public class PatchGenerationService {
                     ? truncate(targetFile.patch(), 4000) : "(no diff)";
             String context     = String.join("\n\n", contextChunks);
             String constraints = "Allowed file: " + finding.getFilePath()
-                    + ". Max " + MAX_PATCH_LINES + " lines.";
+                    + ". Max " + PatchPolicy.MAX_PATCH_LINES + " lines. Use a/ and b/ path prefixes.";
 
             PatchProposal proposal = patchAiService.get()
                     .generatePatch(findingDesc, targetCode, context, constraints);
@@ -192,7 +143,6 @@ public class PatchGenerationService {
         if (repairAiService.isPresent()) {
             String findingDesc    = buildFindingDescription(finding);
             String previousPatchText = previousPatch.getPatchText();
-            // Truncate error logs fed back to the model
             String truncatedError = truncate(validationError, 2000);
 
             PatchProposal proposal = repairAiService.get()
@@ -219,37 +169,5 @@ public class PatchGenerationService {
     private String truncate(String text, int maxChars) {
         if (text == null) return "";
         return text.length() > maxChars ? text.substring(0, maxChars) + "\n...(truncated)" : text;
-    }
-
-    /**
-     * Validates a patch's format and constraints.
-     *
-     * @return null if valid; error message string if invalid
-     */
-    String validatePatch(String patchText, String expectedFilePath, Set<String> allowedFiles) {
-        if (patchText == null || patchText.isBlank()) {
-            return "Patch is empty";
-        }
-
-        // Must start with --- (unified diff format)
-        String trimmed = patchText.stripLeading();
-        if (!trimmed.startsWith("---")) {
-            return "Patch does not start with '---' (invalid unified diff format)";
-        }
-
-        // Bounded size
-        long lineCount = patchText.lines().count();
-        if (lineCount > MAX_PATCH_LINES) {
-            return "Patch exceeds " + MAX_PATCH_LINES + " lines (" + lineCount + " lines)";
-        }
-
-        // Must reference an allowed file
-        boolean referencesAllowedFile = allowedFiles.stream()
-                .anyMatch(f -> patchText.contains(f) || patchText.contains("a/" + f) || patchText.contains("b/" + f));
-        if (!referencesAllowedFile) {
-            return "Patch does not reference any allowed PR file (only PR files may be patched)";
-        }
-
-        return null;
     }
 }

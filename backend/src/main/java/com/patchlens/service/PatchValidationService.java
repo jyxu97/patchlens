@@ -1,385 +1,348 @@
 package com.patchlens.service;
 
-import com.patchlens.model.*;
+import com.patchlens.model.PatchSuggestion;
+import com.patchlens.model.PatchValidation;
+import com.patchlens.model.PatchValidation.Stage;
+import com.patchlens.model.ValidationStatus;
 import com.patchlens.repository.PatchSuggestionRepository;
 import com.patchlens.repository.PatchValidationRepository;
+import com.patchlens.sandbox.*;
+import com.patchlens.util.Redactor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.security.MessageDigest;
 import java.util.*;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
+import java.util.stream.Stream;
 
 /**
- * Validates patch suggestions inside a Docker sandbox.
+ * Validates one patch attempt against a pinned repository snapshot inside the sandbox.
  *
- * Steps per patch:
- *   1. Create temp directory /tmp/patchlens-sandbox-{uuid}
- *   2. Write changed source files to temp dir
- *   3. Apply patch with {@code patch -p1 < patch.diff} (ProcessBuilder)
- *   4. Run Docker container: maven:3.9-eclipse-temurin-21 with compile + test commands
- *   5. Parse result → ValidationStatus
- *   6. Persist PatchValidation entity
- *   7. Delete temp directory
+ * <p>Each call:
+ * <ol>
+ *   <li>re-checks deterministic {@link PatchPolicy} (format, size, allowed files)</li>
+ *   <li>materialises the snapshot into a <em>fresh</em> workspace (never reused across attempts)</li>
+ *   <li>loads {@code patchlens.yaml} from the pristine snapshot (before the patch is applied)</li>
+ *   <li>applies the patch in-process with {@link UnifiedDiff}</li>
+ *   <li>prefetches dependencies (network on, descriptors only), then runs compile, optional
+ *       static analysis and tests with networking disabled</li>
+ *   <li>persists a {@link PatchValidation} row with per-step results and the error output</li>
+ *   <li>deletes the workspace</li>
+ * </ol>
  *
- * In mock mode (ai.mode=mock), Docker execution is skipped; VALIDATED is returned.
+ * <p>If the sandbox cannot run, the result is {@link ValidationStatus#NOT_VALIDATED} (or
+ * {@link ValidationStatus#VALIDATION_ERROR} for infrastructure failures) — never
+ * {@code VALIDATED}. There is no mock shortcut.
  */
 @Service
 public class PatchValidationService {
 
     private static final Logger log = LoggerFactory.getLogger(PatchValidationService.class);
-
-    /** Maximum chars of Docker output to store in logs (10k). */
-    private static final int MAX_LOG_CHARS = 10_000;
+    private static final int MAX_REASON_CHARS = 2_000;
 
     private final PatchValidationRepository validationRepository;
     private final PatchSuggestionRepository patchSuggestionRepository;
-    private final GitHubService gitHubService;
-    private final String aiMode;
+    private final SandboxExecutor sandbox;
+    private final SandboxProperties props;
+    private final Semaphore concurrency;
+    private final Map<String, Object> prefetchLocks = new ConcurrentHashMap<>();
 
     public PatchValidationService(PatchValidationRepository validationRepository,
                                   PatchSuggestionRepository patchSuggestionRepository,
-                                  GitHubService gitHubService,
-                                  @Value("${ai.mode:mock}") String aiMode) {
+                                  SandboxExecutor sandbox,
+                                  SandboxProperties props) {
         this.validationRepository = validationRepository;
         this.patchSuggestionRepository = patchSuggestionRepository;
-        this.gitHubService = gitHubService;
-        this.aiMode = aiMode;
+        this.sandbox = sandbox;
+        this.props = props;
+        this.concurrency = new Semaphore(props.getMaxConcurrent(), true);
+    }
+
+    public SandboxExecutor.Availability availability() {
+        return sandbox.availability();
     }
 
     /**
-     * Validates a patch against a real PR's base content fetched from GitHub.
+     * Validates {@code patch} (its current text) against {@code snapshot} and persists the outcome.
+     * Also updates {@code patch.status}.
      *
-     * @param patch        the patch to validate
-     * @param changedFiles changed files list (filenames + status used to determine fetch strategy)
-     * @param owner        GitHub repo owner (used to fetch base-branch file content)
-     * @param repo         GitHub repo name
-     * @param baseRef      base branch name or SHA (e.g. "main", "abc123f") — files are fetched at this ref
-     * @param config       build/test commands and timeouts from patchlens.yaml
+     * @param allowedFiles  files the patch may modify (policy)
+     * @param attemptNumber 0 for the initial candidate, 1..n for repairs
      */
-    public PatchValidation validate(PatchSuggestion patch,
-                                    List<ChangedFile> changedFiles,
-                                    String owner, String repo, String baseRef,
-                                    ValidationConfig config) {
-        if ("mock".equalsIgnoreCase(aiMode)) {
-            return saveMockValidation(patch);
-        }
-        return runDockerValidation(patch, changedFiles, owner, repo, baseRef, config);
-    }
-
-    /**
-     * Backward-compatible overload used by the eval harness (no GitHub context available).
-     * Writes empty files to the sandbox; patch apply will succeed only for "added" file patches.
-     */
-    public PatchValidation validate(PatchSuggestion patch,
-                                    List<ChangedFile> changedFiles,
-                                    ValidationConfig config) {
-        if ("mock".equalsIgnoreCase(aiMode)) {
-            return saveMockValidation(patch);
-        }
-        return runDockerValidation(patch, changedFiles, null, null, null, config);
-    }
-
-    /**
-     * Eval-harness overload: uses provided source file content instead of fetching from GitHub
-     * or writing empty files. Allows the benchmark to run real Docker compile/test against
-     * curated fixture source without requiring a live GitHub token.
-     *
-     * @param sourceFiles map of repo-relative path → file content to write before applying the patch
-     */
-    public PatchValidation validate(PatchSuggestion patch,
-                                    java.util.Map<String, String> sourceFiles,
-                                    ValidationConfig config) {
-        if ("mock".equalsIgnoreCase(aiMode)) {
-            return saveMockValidation(patch);
-        }
-        return runDockerValidationWithSourceFiles(patch, sourceFiles, config);
-    }
-
-    private PatchValidation runDockerValidationWithSourceFiles(PatchSuggestion patch,
-                                                               java.util.Map<String, String> sourceFiles,
-                                                               ValidationConfig config) {
-        Path sandboxDir = Path.of("/tmp/patchlens-sandbox-" + java.util.UUID.randomUUID());
+    public PatchValidation validate(PatchSuggestion patch, RepositorySnapshot snapshot,
+                                    Set<String> allowedFiles, int attemptNumber) {
         long start = System.currentTimeMillis();
-        boolean patchApplied = false, compilePassed = false,
-                staticAnalysisPassed = false, testsPassed = false;
+        PatchValidation pv = new PatchValidation();
+        pv.setPatchId(patch.getId());
+        pv.setAttemptNumber(attemptNumber);
+        pv.setPatchText(patch.getPatchText());
+        pv.setRevision(snapshot.revision());
         StringBuilder logs = new StringBuilder();
 
         try {
-            Files.createDirectories(sandboxDir);
-
-            // Write curated source files from fixture
-            for (var entry : sourceFiles.entrySet()) {
-                Path dest = sandboxDir.resolve(entry.getKey());
-                Files.createDirectories(dest.getParent());
-                Files.writeString(dest, entry.getValue());
-            }
-
-            Path patchFile = sandboxDir.resolve("patch.diff");
-            Files.writeString(patchFile, patch.getPatchText());
-
-            ProcessResult applyResult = runProcess(
-                    List.of("patch", "-p1", "--input=patch.diff"), sandboxDir, 30);
-            logs.append("=== patch apply ===\n").append(truncate(applyResult.output()));
-            patchApplied = applyResult.exitCode() == 0;
-
-            if (patchApplied) {
-                String dockerCmd = buildDockerCommand(sandboxDir, config);
-                int totalTimeout = config.getTimeouts().compileSeconds()
-                        + config.getTimeouts().staticAnalysisSeconds()
-                        + config.getTimeouts().testSeconds() + 30;
-                ProcessResult dockerResult = runProcess(
-                        List.of("bash", "-c", dockerCmd), sandboxDir, totalTimeout);
-                String out = dockerResult.output();
-                logs.append("\n=== docker run ===\n").append(truncate(out));
-                compilePassed        = out.contains("::COMPILE_OK::");
-                staticAnalysisPassed = !config.getStaticAnalysis().isEnabled()
-                        || out.contains("::STATIC_OK::");
-                testsPassed          = out.contains("::TEST_OK::");
-            }
+            run(patch, snapshot, allowedFiles, pv, logs);
         } catch (Exception e) {
-            logs.append("\n=== error ===\n").append(e.getMessage());
-            log.warn("Docker validation (sourceFiles) error for patch {}: {}", patch.getId(), e.getMessage());
-        } finally {
-            deleteSandbox(sandboxDir);
+            log.warn("Validation of patch {} failed unexpectedly: {}", patch.getId(), Redactor.redact(e.getMessage()));
+            finish(pv, ValidationStatus.VALIDATION_ERROR, Stage.SANDBOX, "Unexpected validation error: " + e.getMessage());
         }
 
-        long durationMs = System.currentTimeMillis() - start;
-        ValidationStatus status;
-        if (!patchApplied)              status = ValidationStatus.REJECTED_PATCH_APPLY;
-        else if (!compilePassed)        status = ValidationStatus.REJECTED_COMPILE;
-        else if (!staticAnalysisPassed) status = ValidationStatus.REJECTED_STATIC_ANALYSIS;
-        else if (!testsPassed)          status = ValidationStatus.REJECTED_TEST;
-        else                            status = ValidationStatus.VALIDATED;
-
-        patch.setStatus(status);
-        patchSuggestionRepository.save(patch);
-
-        PatchValidation pv = new PatchValidation(
-                patch.getId(), patchApplied, compilePassed,
-                staticAnalysisPassed, testsPassed,
-                truncate(logs.toString()), durationMs);
-        return validationRepository.save(pv);
-    }
-
-    // =====================================================================
-    // Mock mode
-    // =====================================================================
-
-    private PatchValidation saveMockValidation(PatchSuggestion patch) {
-        PatchValidation pv = new PatchValidation(
-                patch.getId(), true, true, true, true,
-                "[Mock] Validation skipped in mock mode.", 0L
-        );
+        pv.setLogs(Redactor.redactTail(logs.toString(), props.getMaxLogChars()));
+        pv.setDurationMs(System.currentTimeMillis() - start);
         pv = validationRepository.save(pv);
-        patch.setStatus(ValidationStatus.VALIDATED);
+
+        patch.setStatus(pv.getStatus());
         patchSuggestionRepository.save(patch);
         return pv;
     }
 
-    // =====================================================================
-    // Docker validation
-    // =====================================================================
+    private void run(PatchSuggestion patch, RepositorySnapshot snapshot, Set<String> allowedFiles,
+                     PatchValidation pv, StringBuilder logs) throws Exception {
+        // 1 — deterministic policy (cheap, no sandbox needed)
+        Optional<String> policyError = PatchPolicy.check(patch.getPatchText(), allowedFiles);
+        if (policyError.isPresent()) {
+            finish(pv, ValidationStatus.REJECTED_POLICY, Stage.POLICY, policyError.get());
+            return;
+        }
 
-    private PatchValidation runDockerValidation(PatchSuggestion patch,
-                                                 List<ChangedFile> changedFiles,
-                                                 String owner, String repo, String baseRef,
-                                                 ValidationConfig config) {
-        Path sandboxDir = Path.of("/tmp/patchlens-sandbox-" + UUID.randomUUID());
-        long start = System.currentTimeMillis();
+        // 2 — sandbox must actually be able to run; otherwise the patch is explicitly unvalidated
+        SandboxExecutor.Availability availability = sandbox.availability();
+        if (!availability.available()) {
+            finish(pv, ValidationStatus.NOT_VALIDATED, Stage.SANDBOX, "Sandbox unavailable: " + availability.reason());
+            return;
+        }
 
-        boolean patchApplied        = false;
-        boolean compilePassed        = false;
-        boolean staticAnalysisPassed = false;
-        boolean testsPassed          = false;
-        StringBuilder logs = new StringBuilder();
-
+        concurrency.acquire();
+        Path attemptDir = null;
         try {
-            Files.createDirectories(sandboxDir);
+            Files.createDirectories(props.getWorkRoot());
+            attemptDir = Files.createTempDirectory(props.getWorkRoot(), "attempt-");
+            Path workspace = Files.createDirectory(attemptDir.resolve("workspace"));
+            Path scratch = Files.createDirectory(attemptDir.resolve("scratch"));
 
-            // Write pre-patch file content to sandbox
-            if (owner != null && repo != null && baseRef != null) {
-                writeFilesFromGitHub(changedFiles, owner, repo, baseRef, sandboxDir, logs);
-            } else {
-                writeEmptyFiles(changedFiles, sandboxDir);
+            // 3 — fresh snapshot at the pinned revision
+            try {
+                snapshot.materialize(workspace);
+            } catch (IOException | RuntimeException e) {
+                finish(pv, ValidationStatus.VALIDATION_ERROR, Stage.SNAPSHOT,
+                        "Could not materialise snapshot " + snapshot.describe() + ": " + e.getMessage());
+                return;
             }
 
-            // Write patch file
-            Path patchFile = sandboxDir.resolve("patch.diff");
-            Files.writeString(patchFile, patch.getPatchText());
-
-            // Apply patch
-            ProcessResult applyResult = runProcess(
-                    List.of("patch", "-p1", "--input=patch.diff"),
-                    sandboxDir, 30
-            );
-            logs.append("=== patch apply ===\n").append(truncate(applyResult.output()));
-            patchApplied = applyResult.exitCode() == 0;
-
-            if (patchApplied) {
-                // Run Docker: compile → static analysis → test (sequential, stop on first failure)
-                // Each step emits a sentinel marker so we can identify exactly which step passed.
-                String dockerCmd = buildDockerCommand(sandboxDir, config);
-                int totalTimeout = config.getTimeouts().compileSeconds()
-                        + config.getTimeouts().staticAnalysisSeconds()
-                        + config.getTimeouts().testSeconds() + 30;
-                ProcessResult dockerResult = runProcess(
-                        List.of("bash", "-c", dockerCmd), sandboxDir, totalTimeout);
-                String dockerOutput = dockerResult.output();
-                logs.append("\n=== docker run ===\n").append(truncate(dockerOutput));
-
-                compilePassed        = dockerOutput.contains("::COMPILE_OK::");
-                staticAnalysisPassed = !config.getStaticAnalysis().isEnabled()
-                        || dockerOutput.contains("::STATIC_OK::");
-                testsPassed          = dockerOutput.contains("::TEST_OK::");
+            // 4 — repository config from the pristine tree (the patch cannot change it)
+            ValidationConfigLoader.Loaded loaded;
+            try {
+                loaded = ValidationConfigLoader.load(workspace, props.getMaxStepSeconds());
+            } catch (Exception e) {
+                finish(pv, ValidationStatus.VALIDATION_ERROR, Stage.CONFIG, "Invalid patchlens.yaml: " + e.getMessage());
+                return;
+            }
+            ValidationConfig config = loaded.config();
+            pv.setConfigSource(loaded.source());
+            if (!Files.isRegularFile(workspace.resolve(config.getBuildFile()))) {
+                finish(pv, ValidationStatus.VALIDATION_ERROR, Stage.CONFIG,
+                        "Build file '" + config.getBuildFile() + "' not found at revision " + snapshot.revision());
+                return;
             }
 
-        } catch (Exception e) {
-            logs.append("\n=== error ===\n").append(e.getMessage());
-            log.warn("Docker validation error for patch {}: {}", patch.getId(), e.getMessage());
-        } finally {
-            deleteSandbox(sandboxDir);
-        }
-
-        long durationMs = System.currentTimeMillis() - start;
-
-        // Determine status (ordered: patch → compile → static analysis → tests)
-        ValidationStatus status;
-        if (!patchApplied)            status = ValidationStatus.REJECTED_PATCH_APPLY;
-        else if (!compilePassed)      status = ValidationStatus.REJECTED_COMPILE;
-        else if (!staticAnalysisPassed) status = ValidationStatus.REJECTED_STATIC_ANALYSIS;
-        else if (!testsPassed)        status = ValidationStatus.REJECTED_TEST;
-        else                          status = ValidationStatus.VALIDATED;
-
-        PatchValidation pv = new PatchValidation(
-                patch.getId(), patchApplied, compilePassed, staticAnalysisPassed, testsPassed,
-                logs.toString(), durationMs
-        );
-        pv = validationRepository.save(pv);
-
-        patch.setStatus(status);
-        patchSuggestionRepository.save(patch);
-
-        return pv;
-    }
-
-    // =====================================================================
-    // Helpers
-    // =====================================================================
-
-    /**
-     * Fetches each file's pre-patch content from GitHub at {@code baseRef} and writes it to
-     * the sandbox so that {@code patch -p1} has real source to apply against.
-     *
-     * Strategy by file status:
-     *   modified / renamed / removed → fetch from baseRef (file existed before the PR)
-     *   added                        → file didn't exist at base; write empty so patch can create it
-     *   binary (patch == null)       → skip entirely
-     */
-    private void writeFilesFromGitHub(List<ChangedFile> files,
-                                       String owner, String repo, String baseRef,
-                                       Path sandboxDir, StringBuilder logs) throws IOException {
-        for (ChangedFile f : files) {
-            if (f.patch() == null) continue; // binary — patch can't apply anyway
-
-            Path dest = sandboxDir.resolve(f.filename());
-            Files.createDirectories(dest.getParent());
-
-            if ("added".equals(f.status())) {
-                // File is new — write empty so patch -p1 can create it via the diff
-                Files.write(dest, new byte[0]);
-                continue;
+            // 5 — apply the patch in-process
+            try {
+                UnifiedDiff.apply(workspace, UnifiedDiff.parse(patch.getPatchText()));
+                pv.setPatchApplied(true);
+                logs.append("=== patch apply ===\nok\n");
+            } catch (UnifiedDiff.PatchException e) {
+                logs.append("=== patch apply ===\n").append(e.getMessage()).append('\n');
+                finish(pv, ValidationStatus.REJECTED_PATCH_APPLY, Stage.PATCH_APPLY, "Patch did not apply: " + e.getMessage());
+                return;
             }
 
-            // modified / renamed / removed: fetch the base-branch content
-            Optional<byte[]> content = gitHubService.fetchFileContent(owner, repo, f.filename(), baseRef);
-            if (content.isPresent()) {
-                Files.write(dest, content.get());
-            } else {
-                // 404 at baseRef — treat as added (shouldn't happen for modified/removed, but be safe)
-                log.warn("File {} not found at baseRef {} — writing empty", f.filename(), baseRef);
-                logs.append("[warn] ").append(f.filename()).append(" not found at ").append(baseRef).append("\n");
-                Files.write(dest, new byte[0]);
-            }
-        }
-    }
-
-    /**
-     * Fallback used when no GitHub context is available (eval harness with fixture PRs).
-     * Writes empty files; patch apply will only succeed for "added" file diffs.
-     */
-    private void writeEmptyFiles(List<ChangedFile> files, Path sandboxDir) throws IOException {
-        for (ChangedFile f : files) {
-            if (f.patch() == null) continue;
-            Path dest = sandboxDir.resolve(f.filename());
-            Files.createDirectories(dest.getParent());
-            Files.write(dest, new byte[0]);
-        }
-    }
-
-    /**
-     * Builds a Docker command that runs compile → static analysis → tests in sequence.
-     * Each step emits a sentinel line on success (e.g. {@code ::COMPILE_OK::}) so the
-     * caller can determine exactly which step passed without relying on heuristics.
-     * {@code set -e} ensures the script stops at the first failing step.
-     */
-    private String buildDockerCommand(Path sandboxDir, ValidationConfig config) {
-        String compile = config.getBuild().command().replace("\"", "\\\"");
-        String test    = config.getTests().command().replace("\"", "\\\"");
-
-        StringBuilder script = new StringBuilder("set -e; ");
-        script.append(compile).append(" && echo ::COMPILE_OK::; ");
-
-        if (config.getStaticAnalysis().isEnabled()) {
-            String sa = config.getStaticAnalysis().command().replace("\"", "\\\"");
-            script.append(sa).append(" && echo ::STATIC_OK::; ");
-        }
-
-        script.append(test).append(" && echo ::TEST_OK::");
-
-        return String.format(
-                "docker run --rm --cpus=1 --memory=512m -v %s:/workspace " +
-                "maven:3.9-eclipse-temurin-21 bash -c \"%s\"",
-                sandboxDir.toAbsolutePath(), script
-        );
-    }
-
-    private record ProcessResult(int exitCode, String output) {}
-
-    private ProcessResult runProcess(List<String> command, Path workDir, int timeoutSeconds)
-            throws IOException, InterruptedException {
-        ProcessBuilder pb = new ProcessBuilder(command);
-        pb.directory(workDir.toFile());
-        pb.redirectErrorStream(true);
-
-        Process process = pb.start();
-        String output = new String(process.getInputStream().readAllBytes());
-        boolean finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS);
-        if (!finished) {
-            process.destroyForcibly();
-            return new ProcessResult(1, output + "\n[TIMEOUT after " + timeoutSeconds + "s]");
-        }
-        return new ProcessResult(process.exitValue(), output);
-    }
-
-    private String truncate(String text) {
-        if (text == null) return "";
-        return text.length() > MAX_LOG_CHARS ? text.substring(0, MAX_LOG_CHARS) + "\n...(truncated)" : text;
-    }
-
-    private void deleteSandbox(Path dir) {
-        try {
-            if (Files.exists(dir)) {
-                try (var walk = Files.walk(dir)) {
-                    walk.sorted(Comparator.reverseOrder())
-                        .forEach(p -> {
-                            try { Files.delete(p); } catch (IOException ignored) {}
-                        });
+            // 6 — dependencies (network on, descriptors only), cached per repository
+            Path depCache = dependencyCache(snapshot.dependencyCacheKey());
+            if ("pom.xml".equals(config.getBuildFile())) {
+                SandboxExecutor.StepResult prefetch = prefetchIfNeeded(workspace, attemptDir, depCache);
+                if (prefetch != null) {
+                    logs.append("=== dependency prefetch ===\n").append(prefetch.output()).append('\n');
+                    if (!prefetch.passed()) {
+                        finish(pv, ValidationStatus.VALIDATION_ERROR, Stage.DEPENDENCIES,
+                                "Dependency resolution failed" + (prefetch.timedOut() ? " (timed out)" : "")
+                                        + ": " + tail(prefetch.output()));
+                        return;
+                    }
                 }
             }
+            makeWorldWritable(workspace);
+            makeWorldWritable(scratch);
+
+            // 7 — compile → static analysis → tests, network disabled
+            ValidationConfig.Timeouts t = config.getTimeouts();
+            pv.setCompileRan(true);
+            SandboxExecutor.StepResult compile = step("compile", config.getBuild().command(), workspace, scratch, depCache, t.compileSeconds(), logs);
+            if (!compile.passed()) {
+                pv.setTimedOut(compile.timedOut());
+                if (isOfflineDependencyFailure(compile.output())) {
+                    finish(pv, ValidationStatus.VALIDATION_ERROR, Stage.DEPENDENCIES,
+                            "A dependency was not available offline: " + tail(compile.output()));
+                } else {
+                    finish(pv, ValidationStatus.REJECTED_COMPILE, Stage.COMPILE,
+                            (compile.timedOut() ? "Compilation timed out after " + t.compileSeconds() + "s. " : "Compilation failed. ")
+                                    + tail(compile.output()));
+                }
+                return;
+            }
+            pv.setCompilePassed(true);
+
+            if (config.getStaticAnalysis().isEnabled()) {
+                pv.setStaticAnalysisRan(true);
+                SandboxExecutor.StepResult sa = step("static-analysis", config.getStaticAnalysis().command(),
+                        workspace, scratch, depCache, t.staticAnalysisSeconds(), logs);
+                if (!sa.passed()) {
+                    pv.setTimedOut(sa.timedOut());
+                    finish(pv, ValidationStatus.REJECTED_STATIC_ANALYSIS, Stage.STATIC_ANALYSIS,
+                            "Static analysis failed. " + tail(sa.output()));
+                    return;
+                }
+                pv.setStaticAnalysisPassed(true);
+            } else {
+                pv.setStaticAnalysisRan(false);
+                pv.setStaticAnalysisPassed(true); // not configured — vacuously satisfied, recorded as not run
+            }
+
+            pv.setTestsRan(true);
+            SandboxExecutor.StepResult tests = step("test", config.getTests().command(), workspace, scratch, depCache, t.testSeconds(), logs);
+            if (!tests.passed()) {
+                pv.setTimedOut(tests.timedOut());
+                if (isOfflineDependencyFailure(tests.output())) {
+                    finish(pv, ValidationStatus.VALIDATION_ERROR, Stage.DEPENDENCIES,
+                            "A test dependency was not available offline: " + tail(tests.output()));
+                } else {
+                    finish(pv, ValidationStatus.REJECTED_TEST, Stage.TEST,
+                            (tests.timedOut() ? "Tests timed out after " + t.testSeconds() + "s. " : "Tests failed. ")
+                                    + tail(tests.output()));
+                }
+                return;
+            }
+            pv.setTestsPassed(true);
+            finish(pv, ValidationStatus.VALIDATED, Stage.NONE, null);
+        } finally {
+            concurrency.release();
+            if (attemptDir != null) deleteRecursively(attemptDir);
+        }
+    }
+
+    private SandboxExecutor.StepResult step(String name, String command, Path workspace, Path scratch,
+                                            Path depCache, int timeoutSeconds, StringBuilder logs) {
+        SandboxExecutor.StepResult r = sandbox.runStep(name, command, workspace, scratch, depCache, timeoutSeconds);
+        logs.append("=== ").append(name).append(" (exit ").append(r.exitCode())
+            .append(r.timedOut() ? ", timed out" : "").append(", ").append(r.durationMs()).append("ms) ===\n")
+            .append(r.output()).append('\n');
+        return r;
+    }
+
+    private static void finish(PatchValidation pv, ValidationStatus status, Stage stage, String reason) {
+        pv.setStatus(status);
+        pv.setFailureStage(stage);
+        pv.setFailureReason(reason == null ? null : Redactor.redactTail(reason, MAX_REASON_CHARS));
+    }
+
+    /** Maven's message when an artifact is missing from the offline local repository. */
+    static boolean isOfflineDependencyFailure(String output) {
+        if (output == null) return false;
+        return output.contains("in offline mode")
+                || output.contains("has not been downloaded from it before")
+                || output.contains("Cannot access central");
+    }
+
+    private String tail(String s) {
+        return Redactor.redactTail(s, MAX_REASON_CHARS);
+    }
+
+    // =====================================================================
+    // Dependency cache
+    // =====================================================================
+
+    private Path dependencyCache(String key) throws IOException {
+        String safe = key.replaceAll("[^A-Za-z0-9._-]", "_");
+        Path dir = props.getCacheRoot().resolve("m2").resolve(safe);
+        Files.createDirectories(dir);
+        makeWorldWritable(dir);
+        return dir;
+    }
+
+    /**
+     * Runs the prefetch container if this repository's set of build descriptors has not been
+     * resolved before. Returns null when the cache is already warm.
+     */
+    private SandboxExecutor.StepResult prefetchIfNeeded(Path workspace, Path attemptDir, Path depCache) throws IOException {
+        List<Path> poms;
+        try (Stream<Path> walk = Files.walk(workspace)) {
+            poms = walk.filter(p -> p.getFileName().toString().equals("pom.xml"))
+                       .filter(Files::isRegularFile).sorted().toList();
+        }
+        String fingerprint = fingerprint(workspace, poms);
+        Path marker = depCache.resolve(".prefetched-" + fingerprint);
+
+        Object lock = prefetchLocks.computeIfAbsent(depCache.toString(), k -> new Object());
+        synchronized (lock) {
+            if (Files.exists(marker)) return null;
+
+            Path descriptors = Files.createDirectory(attemptDir.resolve("descriptors"));
+            for (Path pom : poms) {
+                Path rel = workspace.relativize(pom);
+                Path dest = descriptors.resolve(rel.toString());
+                Files.createDirectories(dest.getParent());
+                Files.copy(pom, dest);
+                if (Files.isDirectory(pom.getParent().resolve("src/test/java"))) {
+                    Files.createDirectories(dest.getParent().resolve("src/test/java"));
+                }
+            }
+            makeWorldWritable(descriptors);
+            SandboxExecutor.StepResult r = sandbox.prefetchDependencies(descriptors, depCache, props.getPrefetchTimeoutSeconds());
+            if (r.passed()) Files.writeString(marker, java.time.Instant.now() + "\n");
+            return r;
+        }
+    }
+
+
+    private static String fingerprint(Path root, List<Path> files) throws IOException {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            for (Path f : files) {
+                md.update(root.relativize(f).toString().getBytes(StandardCharsets.UTF_8));
+                md.update(Files.readAllBytes(f));
+            }
+            return HexFormat.of().formatHex(md.digest()).substring(0, 16);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    // =====================================================================
+    // Filesystem helpers
+    // =====================================================================
+
+    /** The container runs as an unprivileged uid, so the disposable dirs must be writable by it. */
+    private static void makeWorldWritable(Path root) {
+        try (Stream<Path> walk = Files.walk(root)) {
+            walk.filter(p -> !Files.isSymbolicLink(p)).forEach(p -> {
+                try {
+                    Files.setPosixFilePermissions(p, PosixFilePermissions.fromString(
+                            Files.isDirectory(p) ? "rwxrwxrwx" : "rw-rw-rw-"));
+                } catch (UnsupportedOperationException | IOException ignored) {}
+            });
+        } catch (IOException ignored) {}
+    }
+
+    static void deleteRecursively(Path dir) {
+        try (Stream<Path> walk = Files.walk(dir)) {
+            walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+            });
         } catch (IOException e) {
             log.warn("Failed to delete sandbox dir {}: {}", dir, e.getMessage());
         }

@@ -41,7 +41,7 @@ public class EvaluationService {
     private final RiskScoringService riskScoringService;
     private final IssueDetectionService issueDetectionService;
     private final PatchGenerationService patchGenerationService;
-    private final PatchValidationService patchValidationService;
+    private final PatchPipelineService patchPipelineService;
     private final EvaluationRunRepository runRepository;
     private final EvaluationCaseResultRepository caseResultRepository;
     private final ObjectMapper objectMapper;
@@ -50,7 +50,7 @@ public class EvaluationService {
                              RiskScoringService riskScoringService,
                              IssueDetectionService issueDetectionService,
                              PatchGenerationService patchGenerationService,
-                             PatchValidationService patchValidationService,
+                             PatchPipelineService patchPipelineService,
                              EvaluationRunRepository runRepository,
                              EvaluationCaseResultRepository caseResultRepository,
                              ObjectMapper objectMapper) {
@@ -58,7 +58,7 @@ public class EvaluationService {
         this.riskScoringService = riskScoringService;
         this.issueDetectionService = issueDetectionService;
         this.patchGenerationService = patchGenerationService;
-        this.patchValidationService = patchValidationService;
+        this.patchPipelineService = patchPipelineService;
         this.runRepository = runRepository;
         this.caseResultRepository = caseResultRepository;
         this.objectMapper = objectMapper;
@@ -183,44 +183,17 @@ public class EvaluationService {
                     .filter(cf -> cf.filename().equals(targetFinding.getFilePath()))
                     .findFirst().orElseThrow();
 
-            ValidationConfig config = ValidationConfig.defaults();
-
-            // Step 1 — Generate initial patch (no repair)
-            PatchSuggestion initial = patchGenerationService.generateSinglePatch(
+            // Same generate → validate → bounded-repair path as the webhook worker
+            Optional<PatchSuggestion> initial = patchGenerationService.generateCandidate(
                     targetFinding, targetFile, List.of());
-
-            // Step 2 — Validate initial patch
-            PatchValidation initPv = ec.sourceFiles().isEmpty()
-                    ? patchValidationService.validate(initial, sample.files(), config)
-                    : patchValidationService.validate(initial, ec.sourceFiles(), config);
-            initApply   = initPv.isPatchApplied();
-            initCompile = initPv.isCompilePassed();
-            initTest    = initPv.isTestsPassed();
-
-            // Step 3 — Repair loop (bounded by MAX_REPAIR_ATTEMPTS)
-            PatchSuggestion current = initial;
-            boolean passed = initCompile && initTest;
-            while (!passed && repairCount < PatchGenerationService.MAX_REPAIR_ATTEMPTS) {
-                String errorFeedback = buildErrorFeedback(initPv);
-                current = patchGenerationService.repairSinglePatch(
-                        targetFinding, current, errorFeedback);
-                repairCount++;
-
-                PatchValidation repairPv = ec.sourceFiles().isEmpty()
-                        ? patchValidationService.validate(current, sample.files(), config)
-                        : patchValidationService.validate(current, ec.sourceFiles(), config);
-                finalApply   = repairPv.isPatchApplied();
-                finalCompile = repairPv.isCompilePassed();
-                finalTest    = repairPv.isTestsPassed();
-                passed = finalCompile && finalTest;
-                initPv = repairPv; // use last result for next error feedback
-            }
-
-            // If first attempt passed, final == initial
-            if (repairCount == 0) {
-                finalApply   = initApply;
-                finalCompile = initCompile;
-                finalTest    = initTest;
+            if (initial.isPresent()) {
+                PatchPipelineService.PatchResult pr = patchPipelineService.validateAndRepair(
+                        targetFinding, initial.get(), fixtureSnapshot(ec));
+                PatchValidation first = pr.attempts().get(0);
+                PatchValidation last  = pr.finalAttempt();
+                initApply = first.isPatchApplied(); initCompile = first.isCompilePassed(); initTest = first.isTestsPassed();
+                finalApply = last.isPatchApplied(); finalCompile = last.isCompilePassed(); finalTest = last.isTestsPassed();
+                repairCount = pr.patch().getRepairAttempts();
             }
         }
 
@@ -234,16 +207,20 @@ public class EvaluationService {
         );
     }
 
-    private String buildErrorFeedback(PatchValidation pv) {
-        if (!pv.isPatchApplied())   return "Patch did not apply cleanly. " + truncateLogs(pv.getLogs());
-        if (!pv.isCompilePassed())  return "Compile failed. " + truncateLogs(pv.getLogs());
-        if (!pv.isTestsPassed())    return "Tests failed. " + truncateLogs(pv.getLogs());
-        return "";
-    }
-
-    private String truncateLogs(String logs) {
-        if (logs == null) return "";
-        return logs.length() > 2000 ? logs.substring(0, 2000) + "...(truncated)" : logs;
+    /** Writes the case's fixture files to a temp dir and exposes them as a snapshot. */
+    private com.patchlens.sandbox.RepositorySnapshot fixtureSnapshot(EvalCase ec) {
+        try {
+            java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("patchlens-eval-" + ec.caseId());
+            for (var e : ec.sourceFiles().entrySet()) {
+                if (e.getKey().startsWith("_")) continue; // documentation keys, not files
+                java.nio.file.Path dest = com.patchlens.sandbox.SafePaths.resolveInside(dir, e.getKey());
+                java.nio.file.Files.createDirectories(dest.getParent());
+                java.nio.file.Files.writeString(dest, e.getValue());
+            }
+            return new com.patchlens.sandbox.DirectorySnapshot(ec.caseId() + "@" + DATASET_VERSION, "eval/" + ec.caseId(), List.of(dir));
+        } catch (java.io.IOException e) {
+            throw new IllegalStateException("Cannot prepare fixture for " + ec.caseId(), e);
+        }
     }
 
     private static double rate(int num, int denom) {
