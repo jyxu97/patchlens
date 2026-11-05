@@ -129,6 +129,12 @@ JobStatusEmitter  SSE push to client  PENDING → PROCESSING → COMPLETED
 
 ---
 
+### RAG freshness and large PRs
+
+- **Versioned index** — chunks are tagged with the default-branch tree SHA. A re-index fetches every file at one pinned commit, writes the new version beside the active one, switches the active version in a single row update, then deletes old chunks. Retrieval reads only the active version, so an analysis never sees a partial or mixed index; a failed re-index leaves the previous version active. One re-index per repository runs at a time.
+- **Explicit freshness** — each analysis records `FRESH` / `STALE` (async re-index triggered) / `UNKNOWN` (current tree not determinable, or untracked seeded chunks) / `NOT_INDEXED`, shown in the PR comment footer.
+- **Large PRs** — changed files are fetched with pagination (up to GitHub's 3000-file listing limit). `ReviewPlanner` deterministically picks files by risk score (`max.changed.files`, default 20), truncates each diff (`max.patch.chars.per.file`, 4000) and packs them into at most `review.max-batches` (3) model calls of `review.batch-char-budget` (32 000) characters. Every skipped file (`NO_TEXT_DIFF`, `REMOVED`, `FILE_LIMIT`, `BATCH_LIMIT`) and truncated diff is stored in the job's `coverage_json` and summarised in the PR comment; findings on files the model did not see are rejected as ungrounded.
+
 ### Reliability model
 
 RabbitMQ gives at-least-once delivery, not exactly-once processing. PatchLens makes repeated delivery safe at the job and output level:

@@ -1,6 +1,7 @@
 package com.patchlens.service;
 
 import com.patchlens.model.FileType;
+import com.patchlens.model.IndexFreshness;
 import com.patchlens.model.RepoIndexMetadata;
 import com.patchlens.repository.ContextChunkRepository;
 import com.patchlens.repository.RepoIndexMetadataRepository;
@@ -14,7 +15,22 @@ import tools.jackson.databind.JsonNode;
 
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Builds the pgvector repository-context index used for RAG.
+ *
+ * <p><b>Versioned, atomic re-indexing.</b> Every chunk is tagged with the default-branch tree SHA
+ * it was built from. A re-index writes the new version next to the old one, then switches the
+ * repository's active version in one row update ({@link RepoIndexStateService#activate}), then
+ * deletes the old chunks. Retrieval only reads the active version, so a concurrent analysis sees
+ * either the complete old index or the complete new one — never a partially built or mixed index.
+ * A failed re-index leaves the previous version active and untouched.
+ *
+ * <p>File contents are fetched at the exact commit whose tree is being indexed, so a push during
+ * indexing cannot mix revisions within one version. Only one re-index per repository runs at a
+ * time in a process.
+ */
 @Service
 public class ContextIndexingService {
 
@@ -28,26 +44,30 @@ public class ContextIndexingService {
     private static final int MAX_INDEXED_FILES = 50;
     private static final int MAX_FILE_CHARS    = 20_000;
 
-    // Matches TTL_GITHUB_PR in CacheService: within one analysis cycle, repo docs are considered stable.
-    private static final Duration SHA_CACHE_TTL = Duration.ofHours(24);
+    /** How long a looked-up "current default-branch tree SHA" is trusted for freshness checks. */
+    private static final Duration CURRENT_SHA_CACHE_TTL = Duration.ofMinutes(5);
 
     private final RestClient restClient;
     private final EmbeddingService embeddingService;
     private final ContextChunkRepository chunkRepository;
     private final RepoIndexMetadataRepository metadataRepository;
     private final CacheService cacheService;
+    private final RepoIndexStateService indexState;
+    private final Set<String> indexingInProgress = ConcurrentHashMap.newKeySet();
 
     public ContextIndexingService(
             @Qualifier("githubRestClient") RestClient restClient,
             EmbeddingService embeddingService,
             ContextChunkRepository chunkRepository,
             RepoIndexMetadataRepository metadataRepository,
-            CacheService cacheService) {
+            CacheService cacheService,
+            RepoIndexStateService indexState) {
         this.restClient = restClient;
         this.embeddingService = embeddingService;
         this.chunkRepository = chunkRepository;
         this.metadataRepository = metadataRepository;
         this.cacheService = cacheService;
+        this.indexState = indexState;
     }
 
     // -------------------------------------------------------------------------
@@ -63,92 +83,101 @@ public class ContextIndexingService {
     }
 
     /**
-     * Returns true if the repository has been indexed AND the index matches the
-     * current default-branch tree SHA (i.e. the index is not stale).
-     *
-     * Used by ReviewController before each PR analysis to decide whether to
-     * trigger a background re-index.
+     * Determines how current the repository's active index is, compared with the current
+     * default-branch tree. Never guesses: if the current tree cannot be determined the result is
+     * UNKNOWN (previously this was silently treated as "up to date").
      */
+    public IndexFreshness freshness(String owner, String repo) {
+        Optional<RepoIndexMetadata> meta = indexState.current(owner, repo);
+        if (meta.isEmpty()) {
+            return isIndexed(owner, repo)
+                    ? new IndexFreshness(IndexFreshness.Status.UNKNOWN, null, null, null, false, false) // untracked legacy/seeded chunks
+                    : IndexFreshness.notIndexed(null);
+        }
+        RepoIndexMetadata m = meta.get();
+        String current = fetchCurrentTreeSha(owner, repo, m.getBaseBranch());
+        IndexFreshness.Status status = current == null ? IndexFreshness.Status.UNKNOWN
+                : current.equals(m.getIndexedTreeSha()) ? IndexFreshness.Status.FRESH
+                : IndexFreshness.Status.STALE;
+        return new IndexFreshness(status, m.getIndexedTreeSha(), current, m.getIndexedAt(), m.isPartialIndex(), false);
+    }
+
+    /** Kept for callers that only need a yes/no answer; UNKNOWN counts as not up to date. */
     public boolean isUpToDate(String owner, String repo) {
-        Optional<RepoIndexMetadata> meta =
-                metadataRepository.findByRepoFullName(owner + "/" + repo);
-        if (meta.isEmpty()) return false;
+        return freshness(owner, repo).status() == IndexFreshness.Status.FRESH;
+    }
 
-        String currentSha = fetchCurrentTreeSha(owner, repo, meta.get().getBaseBranch());
-        if (currentSha == null) return true; // can't check — assume up to date
-
-        return currentSha.equals(meta.get().getIndexedTreeSha());
+    public boolean isIndexing(String owner, String repo) {
+        return indexingInProgress.contains(owner + "/" + repo);
     }
 
     // -------------------------------------------------------------------------
-    // Public: indexing entry points
+    // Public: indexing
     // -------------------------------------------------------------------------
 
     /**
-     * Discovers and indexes the highest-signal files from a GitHub repository.
-     *
-     * Runs asynchronously so PR analysis is never blocked by indexing.
-     * Flow:
-     *   1. Fetch full file tree from GitHub Trees API
-     *   2. Score every file by path / name / extension
-     *   3. Select top MAX_INDEXED_FILES by score
-     *   4. Fetch content, chunk, embed, store in pgvector
-     *   5. Write repo_index_metadata (sha, branch, file count)
-     *   6. Cache the tree SHA in Redis so staleness checks are fast
-     *
-     * Only called when isUpToDate() returns false.
+     * Discovers and indexes the highest-signal files of the default branch as a new index
+     * version, then atomically activates it. Runs asynchronously so PR analysis is never blocked.
      */
     @Async
     public void autoIndex(String owner, String repo) {
-        log.info("Auto-indexing {}/{}: discovering high-signal files", owner, repo);
+        reindex(owner, repo);
+    }
+
+    /** Synchronous body of {@link #autoIndex}; returns the activated version, or empty. */
+    public Optional<String> reindex(String owner, String repo) {
+        String key = owner + "/" + repo;
+        if (!indexingInProgress.add(key)) {
+            log.info("Re-index of {} already in progress — skipping duplicate request", key);
+            return Optional.empty();
+        }
         try {
-            String defaultBranch = fetchDefaultBranch(owner, repo);
-            RepoTree tree = fetchRepoTree(owner, repo, defaultBranch);
-
+            String branch = fetchDefaultBranch(owner, repo);
+            BranchHead head = fetchBranchHead(owner, repo, branch);
+            RepoTree tree = fetchRepoTree(owner, repo, head.treeSha());
             if (tree.truncated()) {
-                log.warn("Tree response for {}/{} is truncated; indexing available files only", owner, repo);
+                log.warn("Tree response for {} is truncated; indexing available files only", key);
             }
-
             List<ScoredFile> selected = scoreAndSelect(tree.files());
-            log.info("Selected {}/{} files to index for {}/{}",
-                    selected.size(), tree.files().size(), owner, repo);
+            log.info("Indexing {} @ {} (tree {}): {}/{} files selected",
+                    key, head.commitSha(), head.treeSha(), selected.size(), tree.files().size());
 
-            // Delete stale chunks then insert fresh ones
-            chunkRepository.deleteByRepositoryOwnerAndRepositoryName(owner, repo);
-            int totalChunks = indexScoredFiles(owner, repo, selected);
+            // Build the new version beside the active one (clearing any earlier partial build of it).
+            String version = head.treeSha();
+            chunkRepository.deleteVersion(owner, repo, version);
+            int totalChunks = indexScoredFiles(owner, repo, selected, head.commitSha(), version);
 
-            // Persist metadata and update SHA cache
-            metadataRepository.deleteByRepoFullName(owner + "/" + repo);
-            metadataRepository.save(new RepoIndexMetadata(
-                    owner + "/" + repo, defaultBranch, tree.sha(),
-                    selected.size(), tree.truncated()
-            ));
-            cacheService.putIndexSha(cacheService.indexShaKey(owner, repo), tree.sha(), SHA_CACHE_TTL);
+            // Atomic switch, then garbage-collect older versions.
+            indexState.activate(owner, repo, branch, version, head.commitSha(), selected.size(), tree.truncated());
+            cacheService.putIndexSha(cacheService.indexShaKey(owner, repo), version, CURRENT_SHA_CACHE_TTL);
+            int removed = chunkRepository.deleteAllExceptVersion(owner, repo, version);
 
-            log.info("Auto-indexing complete for {}/{}: {} files, {} chunks",
-                    owner, repo, selected.size(), totalChunks);
+            log.info("Indexing complete for {}: version {} active ({} files, {} chunks, {} old chunks removed)",
+                    key, version, selected.size(), totalChunks, removed);
+            return Optional.of(version);
         } catch (Exception e) {
-            log.error("Auto-indexing failed for {}/{}: {}", owner, repo, e.getMessage(), e);
+            log.error("Indexing failed for {} — previous index version remains active: {}", key, e.getMessage(), e);
+            return Optional.empty();
+        } finally {
+            indexingInProgress.remove(key);
         }
     }
 
     /**
-     * Indexes a hand-picked list of files from a GitHub repository.
-     * Used by the admin endpoint POST /api/repositories/index.
-     * Existing chunks are deleted first (full re-index).
-     * Returns the total number of chunks indexed.
+     * Indexes a hand-picked list of files (admin endpoint POST /api/repositories/index) as a new
+     * version and activates it. Returns the total number of chunks indexed.
      */
     public int indexFiles(String owner, String repo, List<String> filePaths) {
-        chunkRepository.deleteByRepositoryOwnerAndRepositoryName(owner, repo);
+        String version = "manual-" + UUID.randomUUID();
         int totalChunks = 0;
         for (String filePath : filePaths) {
             try {
-                String content = fetchFileContent(owner, repo, filePath);
+                String content = fetchFileContent(owner, repo, filePath, null);
                 List<String> chunks = chunk(content);
                 for (int i = 0; i < chunks.size(); i++) {
                     float[] embedding = embeddingService.embed(chunks.get(i));
                     chunkRepository.insertChunk(owner, repo, filePath, i, chunks.get(i),
-                            embeddingService.toVectorString(embedding), null);
+                            embeddingService.toVectorString(embedding), null, version);
                     totalChunks++;
                 }
                 log.info("Indexed {} chunks from {}/{}/{}", chunks.size(), owner, repo, filePath);
@@ -156,20 +185,21 @@ public class ContextIndexingService {
                 log.warn("Failed to index {}/{}/{}: {}", owner, repo, filePath, e.getMessage());
             }
         }
+        indexState.activate(owner, repo, "manual", version, null, filePaths.size(), false);
+        chunkRepository.deleteAllExceptVersion(owner, repo, version);
         return totalChunks;
     }
 
     /**
      * Indexes pre-written text content without fetching from GitHub.
-     * Used to seed fixture context chunks for sample PRs at startup.
-     * Only called when isIndexed() returns false, so no delete step is needed.
+     * Used to seed fixture context chunks for sample PRs at startup (untracked version; freshness UNKNOWN).
      */
     public void indexTextContent(String owner, String repo, String filePath, String content) {
         List<String> chunks = chunk(content);
         for (int i = 0; i < chunks.size(); i++) {
             float[] embedding = embeddingService.embed(chunks.get(i));
             chunkRepository.insertChunk(owner, repo, filePath, i, chunks.get(i),
-                    embeddingService.toVectorString(embedding), null);
+                    embeddingService.toVectorString(embedding), null, null);
         }
         log.info("Seeded {} chunks for {}/{}/{}", chunks.size(), owner, repo, filePath);
     }
@@ -177,6 +207,8 @@ public class ContextIndexingService {
     // -------------------------------------------------------------------------
     // Private: GitHub API calls
     // -------------------------------------------------------------------------
+
+    record BranchHead(String commitSha, String treeSha) {}
 
     private String fetchDefaultBranch(String owner, String repo) {
         JsonNode repoInfo = restClient.get()
@@ -186,9 +218,18 @@ public class ContextIndexingService {
         return repoInfo.get("default_branch").asString();
     }
 
-    private RepoTree fetchRepoTree(String owner, String repo, String branch) {
+    /** Resolves the branch head once, so the tree and every file come from the same commit. */
+    private BranchHead fetchBranchHead(String owner, String repo, String branch) {
+        JsonNode c = restClient.get()
+                .uri("/repos/{owner}/{repo}/commits/{branch}", owner, repo, branch)
+                .retrieve()
+                .body(JsonNode.class);
+        return new BranchHead(c.get("sha").asString(), c.path("commit").path("tree").path("sha").asString());
+    }
+
+    private RepoTree fetchRepoTree(String owner, String repo, String treeSha) {
         JsonNode response = restClient.get()
-                .uri("/repos/{owner}/{repo}/git/trees/{branch}?recursive=1", owner, repo, branch)
+                .uri("/repos/{owner}/{repo}/git/trees/{sha}?recursive=1", owner, repo, treeSha)
                 .retrieve()
                 .body(JsonNode.class);
 
@@ -206,12 +247,11 @@ public class ContextIndexingService {
     }
 
     /**
-     * Fetches the current root tree SHA for staleness detection.
-     * Non-recursive — only the SHA matters here, not the file list.
-     * Result is cached in Redis for SHA_CACHE_TTL to avoid per-request API calls.
-     * Returns null if the SHA cannot be fetched (network/auth error).
+     * Fetches the current root tree SHA of {@code branch} for freshness checks (briefly cached).
+     * Returns null if it cannot be determined.
      */
     private String fetchCurrentTreeSha(String owner, String repo, String branch) {
+        if ("manual".equals(branch)) return null;
         String cacheKey = cacheService.indexShaKey(owner, repo);
         Optional<String> cached = cacheService.getIndexSha(cacheKey);
         if (cached.isPresent()) return cached.get();
@@ -222,7 +262,7 @@ public class ContextIndexingService {
                     .retrieve()
                     .body(JsonNode.class);
             String sha = response.get("sha").asString();
-            cacheService.putIndexSha(cacheKey, sha, SHA_CACHE_TTL);
+            cacheService.putIndexSha(cacheKey, sha, CURRENT_SHA_CACHE_TTL);
             return sha;
         } catch (Exception e) {
             log.warn("Failed to fetch current tree SHA for {}/{}: {}", owner, repo, e.getMessage());
@@ -230,11 +270,11 @@ public class ContextIndexingService {
         }
     }
 
-    private String fetchFileContent(String owner, String repo, String filePath) {
-        JsonNode response = restClient.get()
-                .uri("/repos/{owner}/{repo}/contents/{path}", owner, repo, filePath)
-                .retrieve()
-                .body(JsonNode.class);
+    /** @param ref commit SHA to read the file at; null for the default branch */
+    private String fetchFileContent(String owner, String repo, String filePath, String ref) {
+        JsonNode response = ref == null
+                ? restClient.get().uri("/repos/{owner}/{repo}/contents/{path}", owner, repo, filePath).retrieve().body(JsonNode.class)
+                : restClient.get().uri("/repos/{owner}/{repo}/contents/{path}?ref={ref}", owner, repo, filePath, ref).retrieve().body(JsonNode.class);
         String encoded = response.get("content").asString().replaceAll("\\s", "");
         return new String(Base64.getDecoder().decode(encoded));
     }
@@ -243,11 +283,11 @@ public class ContextIndexingService {
     // Private: file discovery and scoring
     // -------------------------------------------------------------------------
 
-    private int indexScoredFiles(String owner, String repo, List<ScoredFile> files) {
+    private int indexScoredFiles(String owner, String repo, List<ScoredFile> files, String commitSha, String version) {
         int total = 0;
         for (ScoredFile file : files) {
             try {
-                String content = fetchFileContent(owner, repo, file.path());
+                String content = fetchFileContent(owner, repo, file.path(), commitSha);
                 if (content.length() > MAX_FILE_CHARS) {
                     content = content.substring(0, MAX_FILE_CHARS);
                 }
@@ -255,7 +295,7 @@ public class ContextIndexingService {
                 for (int i = 0; i < chunks.size(); i++) {
                     float[] embedding = embeddingService.embed(chunks.get(i));
                     chunkRepository.insertChunk(owner, repo, file.path(), i, chunks.get(i),
-                            embeddingService.toVectorString(embedding), file.fileType().name());
+                            embeddingService.toVectorString(embedding), file.fileType().name(), version);
                     total++;
                 }
                 log.debug("Indexed {} chunks from {}/{}/{} ({})",

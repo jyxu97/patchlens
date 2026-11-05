@@ -33,6 +33,22 @@ public class IssueDetectionService {
     private final FindingFilterService findingFilterService;
     private final ReviewFindingRepository findingRepository;
     private final ObjectMapper objectMapper;
+    private int maxFiles = 20;
+    private int maxPatchChars = 4000;
+    private int batchCharBudget = 32_000;
+    private int maxBatches = 3;
+
+    /** Review size limits (tokens and latency stay predictable). */
+    @org.springframework.beans.factory.annotation.Autowired
+    void configureLimits(@org.springframework.beans.factory.annotation.Value("${max.changed.files:20}") int maxFiles,
+                         @org.springframework.beans.factory.annotation.Value("${max.patch.chars.per.file:4000}") int maxPatchChars,
+                         @org.springframework.beans.factory.annotation.Value("${review.batch-char-budget:32000}") int batchCharBudget,
+                         @org.springframework.beans.factory.annotation.Value("${review.max-batches:3}") int maxBatches) {
+        this.maxFiles = maxFiles;
+        this.maxPatchChars = maxPatchChars;
+        this.batchCharBudget = batchCharBudget;
+        this.maxBatches = maxBatches;
+    }
 
     public IssueDetectionService(OpenAIService openAIService,
                                  Optional<ReviewAiService> reviewAiService,
@@ -48,36 +64,55 @@ public class IssueDetectionService {
         this.objectMapper = objectMapper;
     }
 
+    /** Persisted findings plus the record of what was (and was not) reviewed. */
+    public record Detection(List<ReviewFinding> findings, ReviewCoverage coverage) {}
+
+    /** @see #detectWithCoverage */
+    public List<ReviewFinding> detect(UUID reviewJobId, PullRequestMetadata metadata,
+                                      List<ChangedFile> files, List<RiskScore> riskScores) {
+        return detectWithCoverage(reviewJobId, metadata, files, riskScores).findings();
+    }
+
     /**
-     * Runs the full 4-step issue detection pipeline for a PR and persists findings.
+     * Runs the multi-step issue detection pipeline for a PR and persists findings.
      *
-     * @param reviewJobId the owning job ID (stored in each finding)
-     * @param metadata    PR metadata
-     * @param files       changed files from GitHub API
-     * @param riskScores  rule-based risk scores (used for retrieval)
-     * @return list of persisted ReviewFinding entities
+     * <ol>
+     *   <li>Plan: deterministic file selection, per-file diff truncation and batching
+     *       ({@link ReviewPlanner}) — skipped/truncated files are recorded, not silently dropped</li>
+     *   <li>Diff understanding (once, over the reviewed files)</li>
+     *   <li>Context retrieval (active index version only)</li>
+     *   <li>Issue detection — one model call per batch</li>
+     *   <li>Deterministic filter: syntax + grounding against the diffs the model actually saw</li>
+     * </ol>
      */
-    public List<ReviewFinding> detect(UUID reviewJobId,
-                                      PullRequestMetadata metadata,
-                                      List<ChangedFile> files,
-                                      List<RiskScore> riskScores) {
+    public Detection detectWithCoverage(UUID reviewJobId,
+                                        PullRequestMetadata metadata,
+                                        List<ChangedFile> files,
+                                        List<RiskScore> riskScores) {
+        ReviewPlanner.Plan plan = ReviewPlanner.plan(files, riskScores, maxFiles, maxPatchChars, batchCharBudget, maxBatches);
+        List<ChangedFile> reviewed = plan.reviewedFiles();
+        if (reviewed.isEmpty()) return new Detection(List.of(), plan.coverage());
+
         // Step 1 — Diff Understanding (extracts components and retrieval queries)
-        OpenAIService.DiffUnderstanding understanding = openAIService.analyzeDiff(metadata, files);
+        OpenAIService.DiffUnderstanding understanding = openAIService.analyzeDiff(metadata, reviewed);
 
         // Step 2 — Enhanced Context Retrieval using diff-derived queries
         List<RetrievedContextChunk> retrieved = contextRetrievalService.retrieve(
-                metadata, files, riskScores, understanding.retrievalQueries());
+                metadata, reviewed, riskScores, understanding.retrievalQueries());
         List<String> contextChunks = retrieved.stream()
                 .map(RetrievedContextChunk::content)
                 .toList();
 
-        // Step 3 — Issue Detection
-        List<OpenAIService.DetectedFinding> raw = reviewAiService.isPresent()
-                ? detectWithLangChain4j(metadata, files, contextChunks, understanding)
-                : openAIService.detectFindings(metadata, files, contextChunks, understanding);
+        // Step 3 — Issue Detection, bounded batches
+        List<OpenAIService.DetectedFinding> raw = new ArrayList<>();
+        for (List<ChangedFile> batch : plan.batches()) {
+            raw.addAll(reviewAiService.isPresent()
+                    ? detectWithLangChain4j(metadata, batch, contextChunks, understanding)
+                    : openAIService.detectFindings(metadata, batch, contextChunks, understanding));
+        }
 
-        // Step 4 — Deterministic filter (removes malformed, out-of-range, low-confidence findings)
-        List<OpenAIService.DetectedFinding> filtered = findingFilterService.filter(raw, files);
+        // Step 4 — Deterministic filter: a finding on a file the model never saw is ungrounded
+        List<OpenAIService.DetectedFinding> filtered = findingFilterService.filter(raw, reviewed);
 
         // Persist findings
         List<ReviewFinding> saved = new ArrayList<>();
@@ -98,7 +133,7 @@ public class IssueDetectionService {
             saved.add(findingRepository.save(finding));
         }
 
-        return saved;
+        return new Detection(saved, plan.coverage());
     }
 
     // =====================================================================

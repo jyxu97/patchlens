@@ -62,7 +62,7 @@ class ReviewJobWorkerTest {
         ChangedFile file = new ChangedFile("src/A.java", "modified", 1, 1, 2, "@@ -1 +1 @@\n-a\n+b");
         when(reviewService.runAnalysisV2(eq(jobId), any(), any(), anyInt(), any()))
                 .thenReturn(new ReviewService.AnalysisOutcomeV2(mock(ReviewService.AnalysisOutcome.class),
-                        List.of(finding), List.of(file), List.of()));
+                        List.of(finding), List.of(file), List.of(), null));
         when(gitHubService.fetchHeadSha("acme", "backend", 42)).thenReturn(Optional.of(SHA));
         patch = new PatchSuggestion(finding.getId(), "--- a/src/A.java", "r");
         when(patchGenerationService.generateCandidates(any(), any(), any()))
@@ -72,7 +72,7 @@ class ReviewJobWorkerTest {
         when(patchPipelineService.validateAndRepair(finding, patch, snapshot))
                 .thenReturn(new PatchPipelineService.PatchResult(finding, patch, List.of()));
         when(reviewCommentService.canPost()).thenReturn(true);
-        when(reviewCommentService.render(eq(jobId), any(), any())).thenReturn(Optional.of("<!-- marker --> body"));
+        when(reviewCommentService.render(eq(jobId), any(), any(), any())).thenReturn(Optional.of("<!-- marker --> body"));
     }
 
     @Test
@@ -82,7 +82,7 @@ class ReviewJobWorkerTest {
         assertThatCode(() -> worker.process(message)).doesNotThrowAnyException();
 
         verifyNoInteractions(reviewService, patchGenerationService, patchPipelineService, commentDeliveryService);
-        verify(reviewJobService, never()).complete(any(), any(), any(), anyInt(), any());
+        verify(reviewJobService, never()).complete(any(), any(), any(), any(), anyInt(), any());
     }
 
     @Test
@@ -96,7 +96,7 @@ class ReviewJobWorkerTest {
         order.verify(reviewJobService).advance(lease, JobStatus.GENERATING_PATCHES);
         order.verify(reviewJobService).advance(lease, JobStatus.VALIDATING_PATCHES);
         order.verify(patchPipelineService).validateAndRepair(finding, patch, snapshot);
-        order.verify(reviewJobService).complete(eq(lease), any(), any(), eq(1),
+        order.verify(reviewJobService).complete(eq(lease), any(), any(), any(), eq(1),
                 eq(ReviewJobService.CommentPlan.deliver("<!-- marker --> body")));
         order.verify(commentDeliveryService).deliver(jobId);
     }
@@ -111,7 +111,7 @@ class ReviewJobWorkerTest {
 
         verify(reviewJobService).supersede(eq(lease), contains(SHA));
         verifyNoInteractions(patchGenerationService, patchPipelineService, commentDeliveryService);
-        verify(reviewJobService, never()).complete(any(), any(), any(), anyInt(), any());
+        verify(reviewJobService, never()).complete(any(), any(), any(), any(), anyInt(), any());
     }
 
     @Test
@@ -123,7 +123,7 @@ class ReviewJobWorkerTest {
         assertThatCode(() -> worker.process(message)).doesNotThrowAnyException();
 
         verify(reviewJobService, never()).fail(any(), any());
-        verify(reviewJobService, never()).complete(any(), any(), any(), anyInt(), any());
+        verify(reviewJobService, never()).complete(any(), any(), any(), any(), anyInt(), any());
         verifyNoInteractions(commentDeliveryService);
     }
 
@@ -134,7 +134,7 @@ class ReviewJobWorkerTest {
 
         worker.process(message);
 
-        verify(reviewJobService).complete(eq(lease), any(), any(), eq(1), eq(ReviewJobService.CommentPlan.none()));
+        verify(reviewJobService).complete(eq(lease), any(), any(), any(), eq(1), eq(ReviewJobService.CommentPlan.none()));
     }
 
     @Test

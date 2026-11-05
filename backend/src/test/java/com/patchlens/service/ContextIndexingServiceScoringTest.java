@@ -32,7 +32,8 @@ class ContextIndexingServiceScoringTest {
     @BeforeEach
     void setUp() {
         service = new ContextIndexingService(restClient, embeddingService,
-                chunkRepository, metadataRepository, cacheService);
+                chunkRepository, metadataRepository, cacheService,
+                org.mockito.Mockito.mock(RepoIndexStateService.class));
     }
 
     // --- documentation files score highest ---

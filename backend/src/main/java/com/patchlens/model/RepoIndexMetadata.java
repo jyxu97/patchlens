@@ -43,8 +43,12 @@ public class RepoIndexMetadata {
     @Column(name = "partial_index", nullable = false)
     private boolean partialIndex;
 
-    @Column(name = "indexed_at", nullable = false, updatable = false)
+    @Column(name = "indexed_at", nullable = false)
     private Instant indexedAt;
+
+    /** Commit whose tree was indexed; file contents are fetched at this exact commit. Nullable (legacy rows). */
+    @Column(name = "indexed_commit_sha", length = 40)
+    private String indexedCommitSha;
 
     public RepoIndexMetadata() {}
 
@@ -65,4 +69,15 @@ public class RepoIndexMetadata {
     public int getFilesIndexed() { return filesIndexed; }
     public boolean isPartialIndex() { return partialIndex; }
     public Instant getIndexedAt() { return indexedAt; }
+    public String getIndexedCommitSha() { return indexedCommitSha; }
+
+    /** Switches this repository's active index to a newly completed version. */
+    public void activate(String baseBranch, String treeSha, String commitSha, int filesIndexed, boolean partial) {
+        this.baseBranch = baseBranch;
+        this.indexedTreeSha = treeSha;
+        this.indexedCommitSha = commitSha;
+        this.filesIndexed = filesIndexed;
+        this.partialIndex = partial;
+        this.indexedAt = Instant.now();
+    }
 }

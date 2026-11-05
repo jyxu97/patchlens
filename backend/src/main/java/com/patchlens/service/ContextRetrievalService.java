@@ -8,6 +8,7 @@ import com.patchlens.repository.ContextChunkRepository;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Optional;
 
 @Service
 public class ContextRetrievalService {
@@ -16,11 +17,14 @@ public class ContextRetrievalService {
 
     private final ContextChunkRepository chunkRepository;
     private final EmbeddingService embeddingService;
+    private final RepoIndexStateService indexState;
 
     public ContextRetrievalService(ContextChunkRepository chunkRepository,
-                                   EmbeddingService embeddingService) {
+                                   EmbeddingService embeddingService,
+                                   RepoIndexStateService indexState) {
         this.chunkRepository = chunkRepository;
         this.embeddingService = embeddingService;
+        this.indexState = indexState;
     }
 
     /**
@@ -51,8 +55,14 @@ public class ContextRetrievalService {
         float[] queryEmbedding = embeddingService.embed(query);
         String queryVector = embeddingService.toVectorString(queryEmbedding);
 
-        return chunkRepository
-                .findTopKSimilarWithScore(metadata.owner(), metadata.repo(), queryVector, TOP_K)
+        // Only the repository's active index version is searched, so a re-index running
+        // concurrently can never mix its partial chunks into this analysis. Repositories without
+        // a tracked version (seeded fixtures) fall back to all chunks.
+        Optional<String> version = indexState.activeVersion(metadata.owner(), metadata.repo());
+        List<Object[]> rows = version.isPresent()
+                ? chunkRepository.findTopKSimilarWithScoreForVersion(metadata.owner(), metadata.repo(), version.get(), queryVector, TOP_K)
+                : chunkRepository.findTopKSimilarWithScore(metadata.owner(), metadata.repo(), queryVector, TOP_K);
+        return rows
                 .stream()
                 .map(row -> new RetrievedContextChunk(
                         (String) row[0],                                                 // file_path

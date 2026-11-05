@@ -41,6 +41,14 @@ public class RepositoryContextChunk {
     @Column(name = "file_type", length = 20)
     private String fileType;
 
+    /**
+     * Index revision this chunk belongs to (the default-branch tree SHA it was built from).
+     * Retrieval reads only the repository's active version, so a re-index in progress is never
+     * mixed with the previous index. Null for legacy/seeded chunks.
+     */
+    @Column(name = "index_version", length = 64)
+    private String indexVersion;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

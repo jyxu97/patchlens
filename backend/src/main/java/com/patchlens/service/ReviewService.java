@@ -73,7 +73,8 @@ public class ReviewService {
             AnalysisOutcome base,
             List<ReviewFinding> findings,
             List<ChangedFile> changedFiles,
-            List<String> contextChunks
+            List<String> contextChunks,
+            ReviewCoverage coverage
     ) {}
 
     /**
@@ -93,7 +94,8 @@ public class ReviewService {
             ReviewResult reviewResult,
             List<RetrievedContextChunk> retrievedContext,
             UUID reviewSessionId,
-            GroundingReport groundingReport
+            GroundingReport groundingReport,
+            IndexFreshness indexFreshness
     ) {}
 
     /**
@@ -128,7 +130,7 @@ public class ReviewService {
                     true, false,
                     ca.overallRisk(), ca.riskScores(),
                     ca.reviewResult(), ca.retrievedContext(),
-                    null, null
+                    null, null, null
             );
         }
 
@@ -136,11 +138,15 @@ public class ReviewService {
         List<RiskScore> riskScores = riskScoringService.score(files);
         RiskScore.RiskLevel overallRisk = riskScoringService.overallRisk(riskScores);
 
-        boolean alreadyIndexed = contextIndexingService.isIndexed(owner, repo);
-        if (!contextIndexingService.isUpToDate(owner, repo)) {
+        // Explicit freshness: retrieval uses the active (complete) index version; a stale or missing
+        // index triggers an async re-index, and UNKNOWN is reported rather than assumed fresh.
+        IndexFreshness freshness = contextIndexingService.freshness(owner, repo);
+        if ((freshness.status() == IndexFreshness.Status.STALE || freshness.status() == IndexFreshness.Status.NOT_INDEXED)
+                && !contextIndexingService.isIndexing(owner, repo)) {
             contextIndexingService.autoIndex(owner, repo);
+            freshness = freshness.withReindexTriggered();
         }
-        boolean indexing = !alreadyIndexed;
+        boolean indexing = freshness.status() == IndexFreshness.Status.NOT_INDEXED;
 
         long retrievalStart = System.currentTimeMillis();
         List<RetrievedContextChunk> retrieved = contextRetrievalService.retrieve(metadata, files, riskScores);
@@ -186,7 +192,7 @@ public class ReviewService {
                 false, indexing,
                 overallRisk, riskScores,
                 generated.reviewResult(), retrieved,
-                session.getId(), groundingReport
+                session.getId(), groundingReport, freshness
         );
     }
 
@@ -213,7 +219,7 @@ public class ReviewService {
                     true, false,
                     ca.overallRisk(), ca.riskScores(),
                     ca.reviewResult(), ca.retrievedContext(),
-                    null, null
+                    null, null, null
             );
         }
 
@@ -267,7 +273,7 @@ public class ReviewService {
                 false, false,
                 overallRisk, riskScores,
                 generated.reviewResult(), retrieved,
-                session.getId(), groundingReport
+                session.getId(), groundingReport, null
         );
     }
 
@@ -291,13 +297,14 @@ public class ReviewService {
         List<ChangedFile> files = gitHubService.fetchChangedFiles(owner, repo, pullNumber);
         List<RiskScore> riskScores = riskScoringService.score(files);
 
-        List<ReviewFinding> findings = issueDetectionService.detect(jobId, metadata, files, riskScores);
+        IssueDetectionService.Detection detection = issueDetectionService.detectWithCoverage(jobId, metadata, files, riskScores);
 
         List<String> contextChunks = base.retrievedContext().stream()
                 .map(RetrievedContextChunk::content)
                 .toList();
 
-        return new AnalysisOutcomeV2(base, findings, files, contextChunks);
+        ReviewCoverage coverage = detection.coverage().withIndexFreshness(base.indexFreshness());
+        return new AnalysisOutcomeV2(base, detection.findings(), files, contextChunks, coverage);
     }
 
     public String toJson(ReviewResult result) {
@@ -305,6 +312,15 @@ public class ReviewService {
             return objectMapper.writeValueAsString(result);
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize ReviewResult", e);
+        }
+    }
+
+    public String toJson(ReviewCoverage coverage) {
+        if (coverage == null) return null;
+        try {
+            return objectMapper.writeValueAsString(coverage);
+        } catch (Exception e) {
+            return null;
         }
     }
 

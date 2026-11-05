@@ -222,7 +222,14 @@ public class ReviewJobService {
      */
     @Transactional
     public ReviewJob complete(JobLease lease, String diffHash, String resultJson, int findingCount, CommentPlan plan) {
+        return complete(lease, diffHash, resultJson, null, findingCount, plan);
+    }
+
+    @Transactional
+    public ReviewJob complete(JobLease lease, String diffHash, String resultJson, String coverageJson,
+                              int findingCount, CommentPlan plan) {
         ReviewJob job = lockOwned(lease);
+        job.setCoverageJson(coverageJson);
         job.setDiffHash(diffHash);
         job.setResultJson(resultJson);
         job.setFindingCount(findingCount);

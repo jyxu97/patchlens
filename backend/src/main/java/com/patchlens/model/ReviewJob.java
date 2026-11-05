@@ -75,6 +75,10 @@ public class ReviewJob {
     @Column(name = "completed_at")
     private Instant completedAt;
 
+    /** Which files were reviewed / skipped / truncated, and the index freshness used (JSON). */
+    @Column(name = "coverage_json", columnDefinition = "TEXT")
+    private String coverageJson;
+
     // ---- worker lease (atomic ownership; nullable for in-place schema upgrade) ----
 
     /** Opaque token of the delivery currently processing the job; null when unowned. */
@@ -166,6 +170,8 @@ public class ReviewJob {
     public void setCompletedAt(Instant completedAt) { this.completedAt = completedAt; }
     public void setFindingCount(int findingCount) { this.findingCount = findingCount; }
 
+    public String getCoverageJson()            { return coverageJson; }
+    public void setCoverageJson(String json)   { this.coverageJson = json; }
     public String getLeaseOwner()              { return leaseOwner; }
     public Instant getLeaseExpiresAt()         { return leaseExpiresAt; }
     public Instant getPublishedAt()            { return publishedAt; }

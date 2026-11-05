@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS review_jobs (
     updated_at          TIMESTAMP,
     completed_at        TIMESTAMP,
     finding_count       INT          NOT NULL DEFAULT 0,
+    coverage_json       CLOB,
     lease_owner         VARCHAR(64),
     lease_expires_at    TIMESTAMP,
     published_at        TIMESTAMP,

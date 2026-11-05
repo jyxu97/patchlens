@@ -11,6 +11,18 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # Real PostgreSQL + pgvector for the *PgIT tests (row locks, native vector SQL)
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: patchlens
+          POSTGRES_USER: patchlens
+          POSTGRES_PASSWORD: patchlens
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U patchlens" --health-interval 5s --health-timeout 5s --health-retries 10
+
     steps:
       - uses: actions/checkout@v5
 
@@ -23,11 +35,15 @@ jobs:
 
       # Run only pure unit tests (no Spring context, no external services needed)
       - name: Run unit tests
-        run: ./mvnw test -Dtest="GitHubPrUrlParserTest,DiffParserServiceTest,RiskScoringServiceTest,SamplePrLoaderTest,CacheServiceTest,OpenAIServiceTest,WebhookSignatureValidatorTest,GroundingValidationServiceTest,EvalRunnerTest,ReviewCommentServiceTest,ReviewJobStartProcessingTest,ReviewJobWorkerTest,UnifiedDiffTest,PatchPolicyTest,PatchPipelineServiceTest,ProcessRunnerTest,TarGzExtractorTest,GitHubSnapshotServiceTest,ValidationConfigLoaderTest,PatchValidationServiceTest,EvalMatcherTest,EvalDatasetTest,EvaluationMetricsTest,FindingFilterServiceTest,JobReliabilityTest,WebhookControllerTest,WebhookDeduplicationServiceTest,ReviewJobDeduplicationTest" -DfailIfNoTests=false
+        run: ./mvnw test -Dtest="GitHubPrUrlParserTest,DiffParserServiceTest,RiskScoringServiceTest,SamplePrLoaderTest,CacheServiceTest,OpenAIServiceTest,WebhookSignatureValidatorTest,GroundingValidationServiceTest,EvalRunnerTest,ReviewCommentServiceTest,ReviewJobStartProcessingTest,ReviewJobWorkerTest,UnifiedDiffTest,PatchPolicyTest,PatchPipelineServiceTest,ProcessRunnerTest,TarGzExtractorTest,GitHubSnapshotServiceTest,ValidationConfigLoaderTest,PatchValidationServiceTest,EvalMatcherTest,EvalDatasetTest,EvaluationMetricsTest,FindingFilterServiceTest,JobReliabilityTest,WebhookControllerTest,WebhookDeduplicationServiceTest,ReviewJobDeduplicationTest,ReviewPlannerTest,IssueDetectionCoverageTest,ContextIndexingVersioningTest,GitHubChangedFilesPaginationTest,ContextIndexingServiceScoringTest" -DfailIfNoTests=false
         working-directory: backend
 
       # Real Docker sandbox execution (GitHub-hosted Ubuntu runners have Docker).
       # Not mocked: compiles and tests a fixture project in the isolated container.
       - name: Run Docker sandbox integration tests
         run: ./mvnw test -Dtest="DockerSandboxIntegrationTest,EvalFixtureDockerIT,EvaluationHarnessDockerIT" -DfailIfNoTests=false
+        working-directory: backend
+
+      - name: Run PostgreSQL integration tests
+        run: ./mvnw test -Dtest="ContextIndexVersioningPgIT,JobClaimPgIT" -DfailIfNoTests=false
         working-directory: backend

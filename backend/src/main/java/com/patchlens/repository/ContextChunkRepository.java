@@ -37,6 +37,25 @@ public interface ContextChunkRepository extends JpaRepository<RepositoryContextC
             @Param("k") int k
     );
 
+    /** Same as {@link #findTopKSimilarWithScore} but restricted to one index version. */
+    @Query(value = """
+            SELECT file_path, content,
+                   1 - (embedding <=> CAST(:queryVector AS vector)) AS similarity_score
+            FROM repository_context_chunks
+            WHERE repository_owner = :owner
+              AND repository_name  = :repo
+              AND index_version    = :version
+            ORDER BY embedding <=> CAST(:queryVector AS vector)
+            LIMIT :k
+            """, nativeQuery = true)
+    List<Object[]> findTopKSimilarWithScoreForVersion(
+            @Param("owner") String owner,
+            @Param("repo") String repo,
+            @Param("version") String version,
+            @Param("queryVector") String queryVector,
+            @Param("k") int k
+    );
+
     /**
      * Inserts a single chunk with an explicit CAST to vector type.
      * Required because JDBC passes the embedding string as character varying,
@@ -47,9 +66,9 @@ public interface ContextChunkRepository extends JpaRepository<RepositoryContextC
     @Transactional
     @Query(value = """
             INSERT INTO repository_context_chunks
-              (id, repository_owner, repository_name, file_path, chunk_index, content, embedding, file_type, created_at)
+              (id, repository_owner, repository_name, file_path, chunk_index, content, embedding, file_type, index_version, created_at)
             VALUES
-              (gen_random_uuid(), :owner, :repo, :filePath, :chunkIndex, :content, CAST(:embedding AS vector), :fileType, NOW())
+              (gen_random_uuid(), :owner, :repo, :filePath, :chunkIndex, :content, CAST(:embedding AS vector), :fileType, :version, NOW())
             """, nativeQuery = true)
     void insertChunk(
             @Param("owner") String owner,
@@ -58,8 +77,21 @@ public interface ContextChunkRepository extends JpaRepository<RepositoryContextC
             @Param("chunkIndex") int chunkIndex,
             @Param("content") String content,
             @Param("embedding") String embedding,
-            @Param("fileType") String fileType
+            @Param("fileType") String fileType,
+            @Param("version") String version
     );
+
+    /** Removes chunks of one version (a previous failed/partial build of the same version). */
+    @Modifying
+    @Transactional
+    @Query("DELETE FROM RepositoryContextChunk r WHERE r.repositoryOwner = :owner AND r.repositoryName = :repo AND r.indexVersion = :version")
+    int deleteVersion(@Param("owner") String owner, @Param("repo") String repo, @Param("version") String version);
+
+    /** Removes every chunk that does not belong to the now-active version (including legacy unversioned ones). */
+    @Modifying
+    @Transactional
+    @Query("DELETE FROM RepositoryContextChunk r WHERE r.repositoryOwner = :owner AND r.repositoryName = :repo AND (r.indexVersion IS NULL OR r.indexVersion <> :version)")
+    int deleteAllExceptVersion(@Param("owner") String owner, @Param("repo") String repo, @Param("version") String version);
 
     /** Returns true if any chunks exist for the given repository. */
     boolean existsByRepositoryOwnerAndRepositoryName(String repositoryOwner, String repositoryName);

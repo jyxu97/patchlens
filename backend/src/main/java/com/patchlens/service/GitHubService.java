@@ -62,39 +62,52 @@ public class GitHubService {
         );
     }
 
+    /** GitHub's pulls/files endpoint returns at most 3000 files (30 pages of 100). */
+    static final int FILES_PER_PAGE = 100;
+    static final int MAX_FILE_PAGES = 30;
+
     /**
-     * Fetches the list of changed files for a PR.
-     * Calls: GET /repos/{owner}/{repo}/pulls/{pullNumber}/files
+     * Fetches the full list of changed files for a PR, following pagination.
+     * Calls: GET /repos/{owner}/{repo}/pulls/{pullNumber}/files?per_page=100&page=N
      *
-     * GitHub returns up to 100 files per page. For the MVP we fetch only page 1,
-     * which is enough for the configured MAX_CHANGED_FILES=20 limit.
+     * Which of these files are actually sent to the model is decided (and recorded) by
+     * {@link ReviewPlanner}; nothing is dropped here.
      */
     public List<ChangedFile> fetchChangedFiles(String owner, String repo, int pullNumber) {
-        JsonNode response = restClient.get()
-                .uri("/repos/{owner}/{repo}/pulls/{pull}/files?per_page=100",
-                        owner, repo, pullNumber)
-                .retrieve()
-                .onStatus(HttpStatusCode::is4xxClientError, (req, res) -> {
-                    if (res.getStatusCode().value() == 403) {
-                        throw new GitHubApiException("GITHUB_RATE_LIMIT",
-                                "GitHub API rate limit exceeded.");
-                    }
-                    throw new GitHubApiException("GITHUB_API_ERROR",
-                            "GitHub API error: " + res.getStatusCode());
-                })
-                .body(JsonNode.class);
-
         List<ChangedFile> files = new ArrayList<>();
-        for (JsonNode fileNode : response) {
-            files.add(new ChangedFile(
-                    fileNode.get("filename").asString(),
-                    fileNode.get("status").asString(),
-                    fileNode.get("additions").asInt(),
-                    fileNode.get("deletions").asInt(),
-                    fileNode.get("changes").asInt(),
-                    // patch is absent for binary files or when the diff is too large
-                    fileNode.has("patch") ? fileNode.get("patch").asString(null) : null
-            ));
+        for (int page = 1; page <= MAX_FILE_PAGES; page++) {
+            JsonNode response = restClient.get()
+                    .uri("/repos/{owner}/{repo}/pulls/{pull}/files?per_page={per}&page={page}",
+                            owner, repo, pullNumber, FILES_PER_PAGE, page)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::is4xxClientError, (req, res) -> {
+                        if (res.getStatusCode().value() == 403) {
+                            throw new GitHubApiException("GITHUB_RATE_LIMIT",
+                                    "GitHub API rate limit exceeded.", 403);
+                        }
+                        throw new GitHubApiException("GITHUB_API_ERROR",
+                                "GitHub API error: " + res.getStatusCode(), res.getStatusCode().value());
+                    })
+                    .body(JsonNode.class);
+
+            int count = 0;
+            for (JsonNode fileNode : response) {
+                files.add(new ChangedFile(
+                        fileNode.get("filename").asString(),
+                        fileNode.get("status").asString(),
+                        fileNode.get("additions").asInt(),
+                        fileNode.get("deletions").asInt(),
+                        fileNode.get("changes").asInt(),
+                        // patch is absent for binary files or when the diff is too large
+                        fileNode.has("patch") ? fileNode.get("patch").asString(null) : null
+                ));
+                count++;
+            }
+            if (count < FILES_PER_PAGE) break;
+            if (page == MAX_FILE_PAGES) {
+                log.warn("{}/{} #{} has more than {} changed files; GitHub does not list the rest",
+                        owner, repo, pullNumber, FILES_PER_PAGE * MAX_FILE_PAGES);
+            }
         }
         return files;
     }

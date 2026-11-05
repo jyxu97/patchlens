@@ -1,6 +1,8 @@
 package com.patchlens.service;
 
+import com.patchlens.model.IndexFreshness;
 import com.patchlens.model.PatchSuggestion;
+import com.patchlens.model.ReviewCoverage;
 import com.patchlens.model.ReviewFinding;
 import com.patchlens.model.ValidationStatus;
 import org.slf4j.Logger;
@@ -48,8 +50,37 @@ public class ReviewCommentService {
      * Empty when there is nothing to post (no findings).
      */
     public Optional<String> render(UUID jobId, List<ReviewFinding> findings, List<PatchSuggestion> patches) {
+        return render(jobId, findings, patches, null);
+    }
+
+    /** As above, with a coverage footer (reviewed/skipped files, context freshness). */
+    public Optional<String> render(UUID jobId, List<ReviewFinding> findings, List<PatchSuggestion> patches,
+                                   ReviewCoverage coverage) {
         if (findings.isEmpty()) return Optional.empty();
-        return Optional.of(markerFor(jobId) + "\n" + buildComment(findings, patches));
+        return Optional.of(markerFor(jobId) + "\n" + buildComment(findings, patches) + coverageFooter(coverage));
+    }
+
+    static String coverageFooter(ReviewCoverage c) {
+        if (c == null) return "";
+        StringBuilder sb = new StringBuilder("\n<sub>Reviewed ")
+                .append(c.reviewedFiles().size()).append(" of ").append(c.totalFiles()).append(" changed file(s)");
+        if (!c.skippedFiles().isEmpty()) {
+            Map<ReviewCoverage.Reason, Long> byReason = c.skippedFiles().stream()
+                    .collect(Collectors.groupingBy(ReviewCoverage.SkippedFile::reason, java.util.TreeMap::new, Collectors.counting()));
+            sb.append(" — not reviewed: ");
+            sb.append(byReason.entrySet().stream()
+                    .map(e -> e.getValue() + " " + e.getKey().name().toLowerCase().replace('_', ' '))
+                    .collect(Collectors.joining(", ")));
+        }
+        if (!c.truncatedFiles().isEmpty()) {
+            sb.append("; ").append(c.truncatedFiles().size()).append(" diff(s) truncated to ").append(c.maxPatchChars()).append(" chars");
+        }
+        IndexFreshness f = c.indexFreshness();
+        sb.append(". Repository context: ").append(f == null ? "not checked" : f.status().name().toLowerCase().replace('_', ' '));
+        if (f != null && f.indexedRevision() != null) {
+            sb.append(" (index ").append(f.indexedRevision(), 0, Math.min(7, f.indexedRevision().length())).append(")");
+        }
+        return sb.append(".</sub>\n").toString();
     }
 
     /** Result of one delivery attempt. */

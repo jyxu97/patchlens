@@ -147,11 +147,12 @@ public class ReviewJobWorker {
 
             // Stage 4 — Persist results and the rendered comment atomically; delivery follows.
             ReviewJobService.CommentPlan plan = reviewCommentService.canPost()
-                    ? reviewCommentService.render(message.jobId(), outcome.findings(), patches)
+                    ? reviewCommentService.render(message.jobId(), outcome.findings(), patches, outcome.coverage())
                             .map(ReviewJobService.CommentPlan::deliver).orElse(ReviewJobService.CommentPlan.none())
                     : ReviewJobService.CommentPlan.none();
             String resultJson = reviewService.toJson(outcome.base().reviewResult());
-            reviewJobService.complete(lease, outcome.base().diffHash(), resultJson, outcome.findings().size(), plan);
+            reviewJobService.complete(lease, outcome.base().diffHash(), resultJson,
+                    reviewService.toJson(outcome.coverage()), outcome.findings().size(), plan);
             return true;
 
         } catch (JobLease.LeaseLostException e) {
