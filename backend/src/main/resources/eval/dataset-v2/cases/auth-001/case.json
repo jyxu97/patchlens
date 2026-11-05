@@ -1,0 +1,31 @@
+{
+  "caseId": "auth-001",
+  "title": "Add OAuth 2.0 login callback",
+  "body": "Adds the authorization-code callback handler for browser logins and a token exchange client.",
+  "changedFiles": [
+    "src/main/java/com/example/auth/OAuthCallbackHandler.java",
+    "src/main/java/com/example/auth/TokenExchangeClient.java",
+    "src/test/java/com/example/auth/OAuthCallbackHandlerTest.java"
+  ],
+  "expectedFindings": [
+    {
+      "id": "auth-001-csrf",
+      "category": "SECURITY",
+      "file": "src/main/java/com/example/auth/OAuthCallbackHandler.java",
+      "lineStart": 30,
+      "lineEnd": 32,
+      "patchTarget": true,
+      "description": "OAuth state parameter is never compared with the issued value (CSRF)"
+    },
+    {
+      "id": "auth-001-token-log",
+      "category": "SECURITY",
+      "file": "src/main/java/com/example/auth/OAuthCallbackHandler.java",
+      "lineStart": 33,
+      "lineEnd": 33,
+      "patchTarget": false,
+      "description": "Access token written to stdout logs"
+    }
+  ],
+  "referencePatch": "--- a/src/main/java/com/example/auth/OAuthCallbackHandler.java\n+++ b/src/main/java/com/example/auth/OAuthCallbackHandler.java\n@@ -28,7 +28,10 @@\n      * {@link #beginLogin} for this session; otherwise the request may be a CSRF attempt.\n      */\n     public String handleCallback(String sessionId, String code, String state) {\n-        pendingStates.remove(sessionId);\n+        String expected = pendingStates.remove(sessionId);\n+        if (expected == null || !expected.equals(state)) {\n+            throw new SecurityException(\"OAuth state mismatch\");\n+        }\n         String accessToken = tokenClient.exchange(code);\n         System.out.println(\"Issued access token \" + accessToken + \" for session \" + sessionId);\n         return accessToken;\n"
+}

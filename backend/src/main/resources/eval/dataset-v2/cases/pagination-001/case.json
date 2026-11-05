@@ -1,0 +1,21 @@
+{
+  "caseId": "pagination-001",
+  "title": "Add pagination helpers for list endpoints",
+  "body": "Shared helpers to compute page counts and offsets for the new paginated list APIs.",
+  "changedFiles": [
+    "src/main/java/com/example/paging/Pagination.java",
+    "src/test/java/com/example/paging/PaginationTest.java"
+  ],
+  "expectedFindings": [
+    {
+      "id": "pagination-001-ceil",
+      "category": "CORRECTNESS",
+      "file": "src/main/java/com/example/paging/Pagination.java",
+      "lineStart": 14,
+      "lineEnd": 14,
+      "patchTarget": true,
+      "description": "Integer division drops the partial last page (should round up)"
+    }
+  ],
+  "referencePatch": "--- a/src/main/java/com/example/paging/Pagination.java\n+++ b/src/main/java/com/example/paging/Pagination.java\n@@ -11,7 +11,7 @@\n         if (pageSize <= 0) {\n             throw new IllegalArgumentException(\"pageSize must be positive\");\n         }\n-        return totalItems / pageSize;\n+        return (totalItems + pageSize - 1) / pageSize;\n     }\n \n     /** Zero-based index of the first item on the 1-based {@code page}. */\n"
+}

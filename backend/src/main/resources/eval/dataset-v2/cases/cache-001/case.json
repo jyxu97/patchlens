@@ -1,0 +1,31 @@
+{
+  "caseId": "cache-001",
+  "title": "Add in-memory session cache with TTL",
+  "body": "Introduces SessionCache so request handlers can look up sessions without hitting the database. Sessions expire after a configurable TTL.",
+  "changedFiles": [
+    "src/main/java/com/example/session/Session.java",
+    "src/main/java/com/example/session/SessionCache.java",
+    "src/test/java/com/example/session/SessionCacheTest.java"
+  ],
+  "expectedFindings": [
+    {
+      "id": "cache-001-expiry",
+      "category": "CORRECTNESS",
+      "file": "src/main/java/com/example/session/SessionCache.java",
+      "lineStart": 37,
+      "lineEnd": 39,
+      "patchTarget": true,
+      "description": "Expiry check is inverted: live sessions are evicted and expired ones returned"
+    },
+    {
+      "id": "cache-001-hashmap",
+      "category": "CONCURRENCY",
+      "file": "src/main/java/com/example/session/SessionCache.java",
+      "lineStart": 16,
+      "lineEnd": 16,
+      "patchTarget": false,
+      "description": "Non-thread-safe HashMap shared across request threads"
+    }
+  ],
+  "referencePatch": "--- a/src/main/java/com/example/session/SessionCache.java\n+++ b/src/main/java/com/example/session/SessionCache.java\n@@ -34,7 +34,7 @@\n         if (entry == null) {\n             return Optional.empty();\n         }\n-        if (entry.expiresAt().isAfter(clock.instant())) {\n+        if (!entry.expiresAt().isAfter(clock.instant())) {\n             sessions.remove(sessionId);\n             return Optional.empty();\n         }\n"
+}

@@ -1,76 +1,107 @@
 package com.patchlens.service;
 
+import com.patchlens.eval.EvalDataset;
+import com.patchlens.eval.EvalMatcher;
 import com.patchlens.model.*;
 import com.patchlens.repository.EvaluationCaseResultRepository;
 import com.patchlens.repository.EvaluationRunRepository;
+import com.patchlens.sandbox.PatchPolicy;
+import com.patchlens.sandbox.SandboxProperties;
+import com.patchlens.util.Redactor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.core.io.ClassPathResource;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.*;
 
 /**
- * Offline evaluation harness.
+ * Offline evaluation harness over a versioned, executable dataset (default {@code dataset-v2}).
  *
- * Loads curated eval cases from {@code src/test/resources/eval/cases/},
- * runs the full detection + patch + validation pipeline, matches detected findings
- * against expected findings, and persists precision/recall metrics.
+ * <h2>Issue detection</h2>
+ * Each case's PR is run through the production {@link IssueDetectionService} (diff understanding,
+ * retrieval, model detection, deterministic filter/grounding). Detected findings are matched to
+ * labeled expected findings one-to-one by {@link EvalMatcher}; precision = TP/(TP+FP) and
+ * recall = TP/(TP+FN), micro-averaged over all cases.
+ *
+ * <h2>Patch validation</h2>
+ * The denominator of both pass rates is the number of labeled <em>patch targets</em> in the
+ * dataset — fixed, independent of what the model detects. For each target:
+ * <ul>
+ *   <li>if it was matched by a HIGH/MEDIUM detection, the production {@link PatchPipelineService}
+ *       generates a patch and validates it in the Docker sandbox against the case's head tree plus
+ *       hidden oracle tests, with bounded repair;</li>
+ *   <li>otherwise it counts as a failure for both rates (recorded with the reason).</li>
+ * </ul>
+ * initial rate = targets whose first candidate was VALIDATED / targets; final rate = targets whose
+ * final candidate was VALIDATED / targets; improvement = (final − initial) × 100 percentage points.
+ * If the sandbox is unavailable, patch rates are recorded as null — never as measured values.
  */
 @Service
 public class EvaluationService {
 
     private static final Logger log = LoggerFactory.getLogger(EvaluationService.class);
 
-    private static final String PIPELINE_VERSION = "2.0";
-    private static final String DATASET_VERSION  = "v1";
+    private static final String PIPELINE_VERSION = "3.0";
 
-    /** Classpath locations of eval case JSON files. */
-    private static final List<String> EVAL_CASE_PATHS = List.of(
-            "eval/cases/auth-001.json",
-            "eval/cases/cache-001.json",
-            "eval/cases/payment-001.json"
-    );
-
-    private final SamplePrLoader samplePrLoader;
     private final RiskScoringService riskScoringService;
     private final IssueDetectionService issueDetectionService;
     private final PatchGenerationService patchGenerationService;
     private final PatchPipelineService patchPipelineService;
+    private final PatchValidationService patchValidationService;
     private final EvaluationRunRepository runRepository;
     private final EvaluationCaseResultRepository caseResultRepository;
     private final ObjectMapper objectMapper;
+    private final SandboxProperties sandboxProperties;
+    private final String datasetDir;
+    private final String aiMode;
+    private final String modelName;
+    private final double temperature;
+    private final int maxTokens;
+    private final String promptVersion;
 
-    public EvaluationService(SamplePrLoader samplePrLoader,
-                             RiskScoringService riskScoringService,
+    public EvaluationService(RiskScoringService riskScoringService,
                              IssueDetectionService issueDetectionService,
                              PatchGenerationService patchGenerationService,
                              PatchPipelineService patchPipelineService,
+                             PatchValidationService patchValidationService,
                              EvaluationRunRepository runRepository,
                              EvaluationCaseResultRepository caseResultRepository,
-                             ObjectMapper objectMapper) {
-        this.samplePrLoader = samplePrLoader;
+                             ObjectMapper objectMapper,
+                             SandboxProperties sandboxProperties,
+                             @Value("${patchlens.eval.dataset:dataset-v2}") String datasetDir,
+                             @Value("${ai.mode:mock}") String aiMode,
+                             @Value("${openai.model:gpt-4o-mini}") String modelName,
+                             @Value("${openai.temperature:0.1}") double temperature,
+                             @Value("${openai.max-tokens:4000}") int maxTokens,
+                             @Value("${prompt.version:v1}") String promptVersion) {
         this.riskScoringService = riskScoringService;
         this.issueDetectionService = issueDetectionService;
         this.patchGenerationService = patchGenerationService;
         this.patchPipelineService = patchPipelineService;
+        this.patchValidationService = patchValidationService;
         this.runRepository = runRepository;
         this.caseResultRepository = caseResultRepository;
         this.objectMapper = objectMapper;
+        this.sandboxProperties = sandboxProperties;
+        this.datasetDir = datasetDir;
+        this.aiMode = aiMode;
+        this.modelName = modelName;
+        this.temperature = temperature;
+        this.maxTokens = maxTokens;
+        this.promptVersion = promptVersion;
     }
 
-    /**
-     * Triggers an async evaluation run.
-     *
-     * @param modelName  model name to record (e.g. "gpt-4o-mini")
-     * @param promptVersion prompt version tag
-     * @return the created (not yet complete) EvaluationRun
-     */
     @Async
     public void runAsync(UUID runId) {
         EvaluationRun run = runRepository.findById(runId)
@@ -78,8 +109,12 @@ public class EvaluationService {
         execute(run);
     }
 
-    public EvaluationRun createRun(String modelName, String promptVersion) {
-        EvaluationRun run = new EvaluationRun(PIPELINE_VERSION, modelName, promptVersion, DATASET_VERSION);
+    /** Creates a run record whose model/prompt fields reflect the actual configuration. */
+    public EvaluationRun createRun() {
+        String model = "mock".equalsIgnoreCase(aiMode) ? "mock" : modelName;
+        EvaluationRun run = new EvaluationRun(PIPELINE_VERSION, model, promptVersion, datasetDir);
+        run.setStatus("RUNNING");
+        run.setAiMode(aiMode);
         return runRepository.save(run);
     }
 
@@ -87,248 +122,249 @@ public class EvaluationService {
     // Core evaluation loop
     // =====================================================================
 
-    private void execute(EvaluationRun run) {
-        List<EvalCase> cases = loadEvalCases();
-
-        int totalTp = 0, totalFp = 0, totalFn = 0;
-        int totalInitialCompile = 0, totalFinalCompile = 0;
-        int totalInitialTest = 0,    totalFinalTest = 0;
-        int totalPatchApply = 0, totalValidations = 0;
-
-        for (EvalCase ec : cases) {
-            try {
-                EvaluationCaseResult result = evaluateCase(run.getId(), ec);
-                caseResultRepository.save(result);
-
-                totalTp += result.getTruePositives();
-                totalFp += result.getFalsePositives();
-                totalFn += result.getFalseNegatives();
-
-                if (result.isFinalPatchApplySuccess()) totalPatchApply++;
-                if (result.isInitialCompileSuccess())  totalInitialCompile++;
-                if (result.isFinalCompileSuccess())    totalFinalCompile++;
-                if (result.isInitialTestSuccess())     totalInitialTest++;
-                if (result.isFinalTestSuccess())       totalFinalTest++;
-                totalValidations++;
-
-            } catch (Exception e) {
-                log.error("Eval case {} failed: {}", ec.caseId(), e.getMessage(), e);
-            }
-        }
-
-        double precision           = rate(totalTp, totalTp + totalFp);
-        double recall              = rate(totalTp, totalTp + totalFn);
-        double patchApplyRate      = rate(totalPatchApply, totalValidations);
-        double initialCompileRate  = rate(totalInitialCompile, totalValidations);
-        double finalCompileRate    = rate(totalFinalCompile, totalValidations);
-        double initialTestRate     = rate(totalInitialTest, totalValidations);
-        double finalTestRate       = rate(totalFinalTest, totalValidations);
-
-        run.setPrecisionScore(precision);
-        run.setRecallScore(recall);
-        run.setPatchApplyRate(patchApplyRate);
-        run.setInitialCompileSuccessRate(initialCompileRate);
-        run.setCompileSuccessRate(finalCompileRate);
-        run.setInitialTestPassRate(initialTestRate);
-        run.setTestPassRate(finalTestRate);
-        run.setCompletedAt(Instant.now());
-        runRepository.save(run);
-
-        log.info("Eval run {} — precision={} recall={} compile: {}→{} test: {}→{}",
-                run.getId(),
-                pct(precision), pct(recall),
-                pct(initialCompileRate), pct(finalCompileRate),
-                pct(initialTestRate), pct(finalTestRate));
-    }
-
-    /**
-     * Evaluates one case with the full initial → validate → repair → validate flow.
-     *
-     * When the eval case supplies {@code sourceFiles}, each validation step runs real
-     * Docker compile + test against those files. Without sourceFiles, Docker writes empty
-     * files (compile always fails) — only recall metrics are meaningful in that configuration.
-     */
-    private EvaluationCaseResult evaluateCase(UUID runId, EvalCase ec) {
-        long start = System.currentTimeMillis();
-
-        SamplePrLoader.SamplePr sample = samplePrLoader.load(ec.sampleId());
-        List<RiskScore> riskScores = riskScoringService.score(sample.files());
-
-        UUID syntheticJobId = UUID.randomUUID();
-        List<ReviewFinding> detected = issueDetectionService.detect(
-                syntheticJobId, sample.metadata(), sample.files(), riskScores);
-
-        // Precision / recall matching
-        int tp = 0, fp = 0;
-        for (ReviewFinding df : detected) {
-            if (isMatch(df, ec.expectedFindings())) tp++; else fp++;
-        }
-        int fn = Math.max(0, ec.expectedFindings().size() - tp);
-
-        // Find the first HIGH/MEDIUM finding that has a matching changed file — same eligibility
-        // rule as PatchGenerationService so eval exercises the real codepath
-        ReviewFinding targetFinding = detected.stream()
-                .filter(f -> f.getSeverity() == com.patchlens.model.FindingSeverity.HIGH
-                          || f.getSeverity() == com.patchlens.model.FindingSeverity.MEDIUM)
-                .filter(f -> sample.files().stream()
-                        .anyMatch(cf -> cf.filename().equals(f.getFilePath())))
-                .findFirst().orElse(null);
-
-        boolean initApply = false, initCompile = false, initTest = false;
-        boolean finalApply = false, finalCompile = false, finalTest = false;
-        int repairCount = 0;
-
-        if (targetFinding != null) {
-            com.patchlens.model.ChangedFile targetFile = sample.files().stream()
-                    .filter(cf -> cf.filename().equals(targetFinding.getFilePath()))
-                    .findFirst().orElseThrow();
-
-            // Same generate → validate → bounded-repair path as the webhook worker
-            Optional<PatchSuggestion> initial = patchGenerationService.generateCandidate(
-                    targetFinding, targetFile, List.of());
-            if (initial.isPresent()) {
-                PatchPipelineService.PatchResult pr = patchPipelineService.validateAndRepair(
-                        targetFinding, initial.get(), fixtureSnapshot(ec));
-                PatchValidation first = pr.attempts().get(0);
-                PatchValidation last  = pr.finalAttempt();
-                initApply = first.isPatchApplied(); initCompile = first.isCompilePassed(); initTest = first.isTestsPassed();
-                finalApply = last.isPatchApplied(); finalCompile = last.isCompilePassed(); finalTest = last.isTestsPassed();
-                repairCount = pr.patch().getRepairAttempts();
-            }
-        }
-
-        long latency = System.currentTimeMillis() - start;
-        return new EvaluationCaseResult(
-                runId, ec.caseId(), serializeFindings(detected),
-                tp, fp, fn,
-                initApply, initCompile, initTest,
-                finalApply, finalCompile, finalTest,
-                repairCount, latency, 0
-        );
-    }
-
-    /** Writes the case's fixture files to a temp dir and exposes them as a snapshot. */
-    private com.patchlens.sandbox.RepositorySnapshot fixtureSnapshot(EvalCase ec) {
+    /** Runs the whole dataset synchronously. Public for tests and offline drivers. */
+    public EvaluationRun execute(EvaluationRun run) {
+        Path work = null;
         try {
-            java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("patchlens-eval-" + ec.caseId());
-            for (var e : ec.sourceFiles().entrySet()) {
-                if (e.getKey().startsWith("_")) continue; // documentation keys, not files
-                java.nio.file.Path dest = com.patchlens.sandbox.SafePaths.resolveInside(dir, e.getKey());
-                java.nio.file.Files.createDirectories(dest.getParent());
-                java.nio.file.Files.writeString(dest, e.getValue());
+            work = Files.createTempDirectory("patchlens-eval-");
+            EvalDataset dataset = EvalDataset.load(datasetDir, work.resolve("dataset"), objectMapper);
+            boolean sandboxAvailable = patchValidationService.availability().available();
+
+            run.setDatasetVersion(dataset.version());
+            run.setDatasetFingerprint(dataset.fingerprint());
+            run.setPromptFingerprint(promptFingerprint());
+            run.setInferenceConfigJson(objectMapper.writeValueAsString(inferenceConfig()));
+            run.setSandboxAvailable(sandboxAvailable);
+            runRepository.save(run);
+
+            Totals totals = new Totals();
+            for (EvalDataset.Case c : dataset.cases()) {
+                EvaluationCaseResult result = evaluateCase(run.getId(), dataset, c, totals);
+                caseResultRepository.save(result);
             }
-            return new com.patchlens.sandbox.DirectorySnapshot(ec.caseId() + "@" + DATASET_VERSION, "eval/" + ec.caseId(), List.of(dir));
-        } catch (java.io.IOException e) {
-            throw new IllegalStateException("Cannot prepare fixture for " + ec.caseId(), e);
+            applyMetrics(run, totals, sandboxAvailable);
+            run.setStatus("COMPLETED");
+        } catch (Exception e) {
+            log.error("Eval run {} failed: {}", run.getId(), e.getMessage(), e);
+            run.setStatus("FAILED");
+            run.setErrorMessage(Redactor.redact(String.valueOf(e.getMessage())));
+        } finally {
+            run.setCompletedAt(Instant.now());
+            runRepository.save(run);
+            if (work != null) PatchValidationService.deleteRecursively(work);
+        }
+        log.info("Eval run {} [{} {}] dataset={} ({}) — precision={} recall={} patch pass {}→{} ({} pp) sandbox={}",
+                run.getId(), run.getAiMode(), run.getModelName(), run.getDatasetVersion(), run.getDatasetFingerprint(),
+                run.getPrecisionScore(), run.getRecallScore(),
+                run.getInitialPatchPassRate(), run.getFinalPatchPassRate(), run.getPatchPassImprovementPp(),
+                run.getSandboxAvailable());
+        return run;
+    }
+
+    /** Aggregates across cases. */
+    static final class Totals {
+        int tp, fp, fn, expected, detected;
+        int patchTargets, attempted, initialPass, finalPass;
+        int finalApply, initialCompile, finalCompile, initialTest, finalTest;
+    }
+
+    /** Outcome for one labeled patch target. */
+    record PatchTargetOutcome(String expectedId, boolean attempted, String skipReason,
+                              String detectedTitle, ValidationStatus initialStatus, ValidationStatus finalStatus,
+                              int repairCount, String initialPatch, String finalPatch, String finalFailureReason,
+                              boolean initialApply, boolean initialCompile, boolean initialTest,
+                              boolean finalApply, boolean finalCompile, boolean finalTest) {
+        boolean initialPassed() { return initialStatus == ValidationStatus.VALIDATED; }
+        boolean finalPassed()   { return finalStatus == ValidationStatus.VALIDATED; }
+
+        static PatchTargetOutcome skipped(String expectedId, String reason, String detectedTitle) {
+            return new PatchTargetOutcome(expectedId, false, reason, detectedTitle, null, null, 0,
+                    null, null, null, false, false, false, false, false, false);
         }
     }
 
-    private static double rate(int num, int denom) {
-        return denom > 0 ? (double) num / denom : 0.0;
-    }
+    private EvaluationCaseResult evaluateCase(UUID runId, EvalDataset dataset, EvalDataset.Case c, Totals totals) {
+        long start = System.currentTimeMillis();
+        List<EvalDataset.ExpectedFinding> expected = c.expectedFindings();
+        totals.expected += expected.size();
+        totals.patchTargets += c.patchTargets().size();
 
-    private static String pct(double r) {
-        return String.format("%.0f%%", r * 100);
-    }
+        List<ReviewFinding> detected = List.of();
+        EvalMatcher.Result match;
+        List<PatchTargetOutcome> patchOutcomes = new ArrayList<>();
+        String error = null;
+        try {
+            List<RiskScore> riskScores = riskScoringService.score(c.changedFiles());
+            detected = issueDetectionService.detect(UUID.randomUUID(), c.metadata(), c.changedFiles(), riskScores);
 
-    /**
-     * A finding matches an expected finding if category matches and the file matches.
-     */
-    private boolean isMatch(ReviewFinding detected, List<ExpectedFinding> expected) {
-        for (ExpectedFinding ef : expected) {
-            if (ef.category().name().equalsIgnoreCase(detected.getCategory().name())
-                    && detected.getFilePath().contains(fileBaseName(ef.file()))) {
-                return true;
+            List<EvalMatcher.Detected> det = new ArrayList<>();
+            for (int i = 0; i < detected.size(); i++) {
+                ReviewFinding f = detected.get(i);
+                det.add(new EvalMatcher.Detected(i, f.getCategory(), f.getFilePath(),
+                        f.getLineStart() == null ? 0 : f.getLineStart(),
+                        f.getLineEnd() == null ? 0 : f.getLineEnd()));
+            }
+            match = EvalMatcher.match(expected.stream().map(EvalDataset.ExpectedFinding::toMatcher).toList(), det);
+
+            for (EvalDataset.ExpectedFinding target : c.patchTargets()) {
+                patchOutcomes.add(evaluatePatchTarget(dataset, c, target, match, detected));
+            }
+        } catch (Exception e) {
+            log.error("Eval case {} failed: {}", c.caseId(), e.getMessage(), e);
+            error = Redactor.redact(String.valueOf(e.getMessage()));
+            // A crashed case still counts against recall and the patch denominator.
+            match = new EvalMatcher.Result(List.of(), 0, 0, expected.size());
+            patchOutcomes.clear();
+            for (EvalDataset.ExpectedFinding target : c.patchTargets()) {
+                patchOutcomes.add(PatchTargetOutcome.skipped(target.id(), "case error: " + error, null));
             }
         }
-        return false;
-    }
 
-    private String fileBaseName(String path) {
-        int idx = path.lastIndexOf('/');
-        return idx >= 0 ? path.substring(idx + 1) : path;
-    }
-
-    // =====================================================================
-    // Eval case loading
-    // =====================================================================
-
-    record ExpectedFinding(FindingCategory category, String file, int[] lineRange, String description) {}
-
-    /**
-     * @param sourceFiles optional map of repo-relative path → file content; when present, Docker
-     *                    validation writes these files to the sandbox instead of empty stubs.
-     *                    Leave empty to measure recall only (compile metrics will be 0%).
-     */
-    record EvalCase(String caseId, String sampleId, String description,
-                    List<ExpectedFinding> expectedFindings,
-                    java.util.Map<String, String> sourceFiles) {}
-
-    private List<EvalCase> loadEvalCases() {
-        List<EvalCase> result = new ArrayList<>();
-        for (String path : EVAL_CASE_PATHS) {
-            try {
-                ClassPathResource resource = new ClassPathResource(path);
-                if (!resource.exists()) {
-                    log.warn("Eval case not found on classpath: {}", path);
-                    continue;
-                }
-                try (InputStream is = resource.getInputStream()) {
-                    JsonNode root = objectMapper.readTree(is);
-                    String caseId   = root.path("caseId").asString("");
-                    String sampleId = root.path("sampleId").asString("");
-                    String desc     = root.path("description").asString("");
-
-                    List<ExpectedFinding> expected = new ArrayList<>();
-                    for (JsonNode fn : root.path("expectedFindings")) {
-                        String catStr = fn.path("category").asString("MAINTAINABILITY");
-                        FindingCategory cat;
-                        try { cat = FindingCategory.valueOf(catStr); }
-                        catch (Exception e) { cat = FindingCategory.MAINTAINABILITY; }
-
-                        JsonNode lr = fn.path("lineRange");
-                        int[] lineRange = (lr.isArray() && lr.size() >= 2)
-                                ? new int[]{lr.get(0).asInt(1), lr.get(1).asInt(999)}
-                                : new int[]{1, 999};
-
-                        expected.add(new ExpectedFinding(
-                                cat,
-                                fn.path("file").asString(""),
-                                lineRange,
-                                fn.path("description").asString("")
-                        ));
-                    }
-                    // Parse optional sourceFiles map (path → content)
-                    java.util.Map<String, String> sourceFiles = new java.util.LinkedHashMap<>();
-                    JsonNode sfNode = root.path("sourceFiles");
-                    if (sfNode.isObject()) {
-                        sfNode.properties().forEach(e ->
-                                sourceFiles.put(e.getKey(), e.getValue().asString("")));
-                    }
-
-                    result.add(new EvalCase(caseId, sampleId, desc, expected, sourceFiles));
-                }
-            } catch (Exception e) {
-                log.error("Failed to load eval case {}: {}", path, e.getMessage(), e);
-            }
+        totals.tp += match.truePositives();
+        totals.fp += match.falsePositives();
+        totals.fn += match.falseNegatives();
+        totals.detected += detected.size();
+        for (PatchTargetOutcome o : patchOutcomes) {
+            if (o.attempted()) totals.attempted++;
+            if (o.initialPassed()) totals.initialPass++;
+            if (o.finalPassed()) totals.finalPass++;
+            if (o.finalApply()) totals.finalApply++;
+            if (o.initialCompile()) totals.initialCompile++;
+            if (o.finalCompile()) totals.finalCompile++;
+            if (o.initialTest()) totals.initialTest++;
+            if (o.finalTest()) totals.finalTest++;
         }
+
+        PatchTargetOutcome first = patchOutcomes.isEmpty() ? null : patchOutcomes.get(0);
+        EvaluationCaseResult result = new EvaluationCaseResult(
+                runId, c.caseId(), serializeFindings(detected),
+                match.truePositives(), match.falsePositives(), match.falseNegatives(),
+                first != null && first.initialApply(), first != null && first.initialCompile(), first != null && first.initialTest(),
+                first != null && first.finalApply(), first != null && first.finalCompile(), first != null && first.finalTest(),
+                first == null ? 0 : first.repairCount(), System.currentTimeMillis() - start, 0);
+        result.setExpectedFindingsJson(json(expected));
+        result.setMatchesJson(json(match.matches()));
+        result.setPatchResultsJson(json(patchOutcomes));
+        result.setErrorMessage(error);
         return result;
     }
 
-    private String serializeFindings(List<ReviewFinding> findings) {
-        try {
-            List<Map<String, Object>> list = findings.stream().map(f -> {
-                Map<String, Object> m = new LinkedHashMap<>();
-                m.put("file", f.getFilePath());
-                m.put("category", f.getCategory().name());
-                m.put("severity", f.getSeverity().name());
-                m.put("title", f.getTitle());
-                m.put("confidence", f.getConfidence());
-                return m;
-            }).toList();
-            return objectMapper.writeValueAsString(list);
-        } catch (Exception e) {
-            return "[]";
+    private PatchTargetOutcome evaluatePatchTarget(EvalDataset dataset, EvalDataset.Case c,
+                                                   EvalDataset.ExpectedFinding target,
+                                                   EvalMatcher.Result match, List<ReviewFinding> detected) {
+        Optional<Integer> idx = match.detectedFor(target.id());
+        if (idx.isEmpty()) return PatchTargetOutcome.skipped(target.id(), "not detected", null);
+
+        ReviewFinding finding = detected.get(idx.get());
+        if (!PatchGenerationService.isEligible(finding)) {
+            return PatchTargetOutcome.skipped(target.id(),
+                    "detected with " + finding.getSeverity() + " severity — no patch generated (production rule: HIGH/MEDIUM only)",
+                    finding.getTitle());
         }
+        ChangedFile file = c.changedFiles().stream()
+                .filter(cf -> cf.filename().equals(finding.getFilePath())).findFirst().orElse(null);
+        if (file == null) return PatchTargetOutcome.skipped(target.id(), "finding file not in PR", finding.getTitle());
+
+        Optional<PatchSuggestion> candidate = patchGenerationService.generateCandidate(finding, file, List.of());
+        if (candidate.isEmpty()) {
+            return new PatchTargetOutcome(target.id(), true, "patch generation failed", finding.getTitle(),
+                    null, null, 0, null, null, null, false, false, false, false, false, false);
+        }
+
+        PatchPipelineService.PatchResult pr = patchPipelineService.validateAndRepair(
+                finding, candidate.get(), c.validationSnapshot(dataset.version()));
+        PatchValidation init = pr.attempts().get(0);
+        PatchValidation last = pr.finalAttempt();
+        return new PatchTargetOutcome(target.id(), true, null, finding.getTitle(),
+                init.getStatus(), last.getStatus(), pr.patch().getRepairAttempts(),
+                init.getPatchText(), last.getPatchText(), last.getFailureReason(),
+                init.isPatchApplied(), init.isCompilePassed(), init.isTestsPassed(),
+                last.isPatchApplied(), last.isCompilePassed(), last.isTestsPassed());
+    }
+
+    static void applyMetrics(EvaluationRun run, Totals t, boolean sandboxAvailable) {
+        run.setTruePositives(t.tp);
+        run.setFalsePositives(t.fp);
+        run.setFalseNegatives(t.fn);
+        run.setExpectedCount(t.expected);
+        run.setDetectedCount(t.detected);
+        run.setPrecisionScore(t.tp + t.fp > 0 ? (double) t.tp / (t.tp + t.fp) : null);
+        run.setRecallScore(t.tp + t.fn > 0 ? (double) t.tp / (t.tp + t.fn) : null);
+
+        run.setPatchTargetCount(t.patchTargets);
+        run.setPatchAttemptedCount(t.attempted);
+        run.setInitialPatchPassCount(t.initialPass);
+        run.setFinalPatchPassCount(t.finalPass);
+        if (sandboxAvailable && t.patchTargets > 0) {
+            double initial = (double) t.initialPass / t.patchTargets;
+            double fin = (double) t.finalPass / t.patchTargets;
+            run.setInitialPatchPassRate(initial);
+            run.setFinalPatchPassRate(fin);
+            run.setPatchPassImprovementPp(Math.round((fin - initial) * 1000.0) / 10.0);
+            run.setPatchApplyRate((double) t.finalApply / t.patchTargets);
+            run.setInitialCompileSuccessRate((double) t.initialCompile / t.patchTargets);
+            run.setCompileSuccessRate((double) t.finalCompile / t.patchTargets);
+            run.setInitialTestPassRate((double) t.initialTest / t.patchTargets);
+            run.setTestPassRate((double) t.finalTest / t.patchTargets);
+        }
+    }
+
+    // =====================================================================
+    // Reproducibility metadata
+    // =====================================================================
+
+    private Map<String, Object> inferenceConfig() {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("aiMode", aiMode);
+        m.put("model", "mock".equalsIgnoreCase(aiMode) ? "mock" : modelName);
+        m.put("temperature", temperature);
+        m.put("maxTokens", maxTokens);
+        m.put("promptVersion", promptVersion);
+        m.put("maxRepairAttempts", PatchGenerationService.MAX_REPAIR_ATTEMPTS);
+        m.put("maxPatchLines", PatchPolicy.MAX_PATCH_LINES);
+        m.put("patchEligibleSeverities", List.of("HIGH", "MEDIUM"));
+        m.put("sandboxImage", sandboxProperties.getImage());
+        m.put("matchRule", Map.of("sameFile", true, "sameCategory", true,
+                "lineOverlapTolerance", EvalMatcher.LINE_TOLERANCE, "assignment", "one-to-one maximum matching"));
+        m.put("patchRateDenominator", "all labeled patch targets in the dataset");
+        return m;
+    }
+
+    private static String promptFingerprint() {
+        try {
+            Resource[] prompts = new PathMatchingResourcePatternResolver().getResources("classpath*:prompts/*.txt");
+            Arrays.sort(prompts, Comparator.comparing(r -> String.valueOf(r.getFilename())));
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            for (Resource r : prompts) {
+                md.update(String.valueOf(r.getFilename()).getBytes(StandardCharsets.UTF_8));
+                try (InputStream in = r.getInputStream()) { md.update(in.readAllBytes()); }
+            }
+            return HexFormat.of().formatHex(md.digest()).substring(0, 16);
+        } catch (Exception e) {
+            return "unknown";
+        }
+    }
+
+    private String json(Object o) {
+        try { return objectMapper.writeValueAsString(o); } catch (Exception e) { return null; }
+    }
+
+    private String serializeFindings(List<ReviewFinding> findings) {
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (int i = 0; i < findings.size(); i++) {
+            ReviewFinding f = findings.get(i);
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("index", i);
+            m.put("file", f.getFilePath());
+            m.put("lineStart", f.getLineStart());
+            m.put("lineEnd", f.getLineEnd());
+            m.put("category", f.getCategory().name());
+            m.put("severity", f.getSeverity().name());
+            m.put("title", f.getTitle());
+            m.put("confidence", f.getConfidence());
+            list.add(m);
+        }
+        String s = json(list);
+        return s == null ? "[]" : s;
     }
 }

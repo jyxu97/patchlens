@@ -1,0 +1,32 @@
+{
+  "caseId": "payment-001",
+  "title": "Add checkout service for card payments",
+  "body": "Implements checkout against the payment gateway. Failed charges are reconciled nightly.",
+  "changedFiles": [
+    "src/main/java/com/example/billing/CheckoutService.java",
+    "src/main/java/com/example/billing/GatewayException.java",
+    "src/main/java/com/example/billing/PaymentGateway.java",
+    "src/test/java/com/example/billing/CheckoutServiceTest.java"
+  ],
+  "expectedFindings": [
+    {
+      "id": "payment-001-swallowed",
+      "category": "ERROR_HANDLING",
+      "file": "src/main/java/com/example/billing/CheckoutService.java",
+      "lineStart": 21,
+      "lineEnd": 24,
+      "patchTarget": true,
+      "description": "Gateway failure is swallowed and the charge is reported as successful"
+    },
+    {
+      "id": "payment-001-quantity",
+      "category": "CORRECTNESS",
+      "file": "src/main/java/com/example/billing/CheckoutService.java",
+      "lineStart": 17,
+      "lineEnd": 18,
+      "patchTarget": false,
+      "description": "Zero or negative quantity is accepted, producing zero or negative charges"
+    }
+  ],
+  "referencePatch": "--- a/src/main/java/com/example/billing/CheckoutService.java\n+++ b/src/main/java/com/example/billing/CheckoutService.java\n@@ -18,8 +18,8 @@\n         long total = unitPriceCents * quantity;\n         try {\n             gateway.charge(customerId, total);\n-        } catch (Exception e) {\n-            // gateway hiccups are picked up by the nightly reconciliation job\n+        } catch (GatewayException e) {\n+            return false;\n         }\n         return true;\n     }\n"
+}

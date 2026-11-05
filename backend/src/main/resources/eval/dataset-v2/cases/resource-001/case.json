@@ -1,0 +1,21 @@
+{
+  "caseId": "resource-001",
+  "title": "Add CSV importer for user uploads",
+  "body": "Parses uploaded name,amount CSV files into rows for the billing import job.",
+  "changedFiles": [
+    "src/main/java/com/example/importer/CsvImporter.java",
+    "src/test/java/com/example/importer/CsvImporterTest.java"
+  ],
+  "expectedFindings": [
+    {
+      "id": "resource-001-leak",
+      "category": "ERROR_HANDLING",
+      "file": "src/main/java/com/example/importer/CsvImporter.java",
+      "lineStart": 18,
+      "lineEnd": 25,
+      "patchTarget": true,
+      "description": "Reader is not closed when parsing throws (no try-with-resources)"
+    }
+  ],
+  "referencePatch": "--- a/src/main/java/com/example/importer/CsvImporter.java\n+++ b/src/main/java/com/example/importer/CsvImporter.java\n@@ -15,14 +15,14 @@\n \n     /** Parses all rows. The stream is always closed, even if a row is malformed. */\n     public List<Row> importRows(InputStream in) throws IOException {\n-        BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));\n-        List<Row> rows = new ArrayList<>();\n-        String line;\n-        while ((line = reader.readLine()) != null) {\n-            String[] parts = line.split(\",\");\n-            rows.add(new Row(parts[0].trim(), Long.parseLong(parts[1].trim())));\n+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {\n+            List<Row> rows = new ArrayList<>();\n+            String line;\n+            while ((line = reader.readLine()) != null) {\n+                String[] parts = line.split(\",\");\n+                rows.add(new Row(parts[0].trim(), Long.parseLong(parts[1].trim())));\n+            }\n+            return rows;\n         }\n-        reader.close();\n-        return rows;\n     }\n }\n"
+}

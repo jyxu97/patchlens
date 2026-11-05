@@ -16,6 +16,7 @@ import java.util.UUID;
  * REST endpoints for triggering and inspecting offline evaluation runs.
  *
  * POST /api/eval/run             → trigger async evaluation run
+ * GET  /api/eval/runs/{id}/export → full reproducibility export
  * GET  /api/eval/runs            → list all runs with aggregate metrics
  * GET  /api/eval/runs/{id}       → detailed results for one run
  */
@@ -27,33 +28,63 @@ public class EvalController {
     private final EvaluationRunRepository runRepository;
     private final EvaluationCaseResultRepository caseResultRepository;
 
+    private final tools.jackson.databind.ObjectMapper objectMapper;
+
     public EvalController(EvaluationService evaluationService,
                           EvaluationRunRepository runRepository,
-                          EvaluationCaseResultRepository caseResultRepository) {
+                          EvaluationCaseResultRepository caseResultRepository,
+                          tools.jackson.databind.ObjectMapper objectMapper) {
         this.evaluationService = evaluationService;
         this.runRepository = runRepository;
         this.caseResultRepository = caseResultRepository;
+        this.objectMapper = objectMapper;
     }
 
     /**
-     * Triggers an async evaluation run.
-     * Request body (optional):
-     *   { "modelName": "gpt-4o-mini", "promptVersion": "v1" }
+     * Triggers an async evaluation run over the configured dataset (patchlens.eval.dataset).
+     * Model, prompt version and inference settings are taken from the running configuration and
+     * recorded on the run — they cannot be overridden by the request.
      */
     @PostMapping("/run")
-    public ResponseEntity<Map<String, Object>> triggerRun(
-            @RequestBody(required = false) Map<String, String> body) {
-        String modelName    = body != null ? body.getOrDefault("modelName", "mock") : "mock";
-        String promptVersion = body != null ? body.getOrDefault("promptVersion", "v1") : "v1";
-
-        EvaluationRun run = evaluationService.createRun(modelName, promptVersion);
+    public ResponseEntity<Map<String, Object>> triggerRun() {
+        EvaluationRun run = evaluationService.createRun();
         evaluationService.runAsync(run.getId());
-
         return ResponseEntity.accepted().body(Map.of(
                 "runId", run.getId().toString(),
                 "status", "RUNNING",
+                "aiMode", String.valueOf(run.getAiMode()),
                 "message", "Evaluation started asynchronously"
         ));
+    }
+
+    /**
+     * Full, self-describing export of one run for archiving/reproduction: run metadata (dataset
+     * version + fingerprint, prompt fingerprint, inference config), aggregate metrics, and per-case
+     * expected findings, model findings, matches, initial/final patches and validation outcomes.
+     */
+    @GetMapping("/runs/{id}/export")
+    public ResponseEntity<Map<String, Object>> exportRun(@PathVariable UUID id) {
+        return runRepository.findById(id)
+                .map(run -> {
+                    Map<String, Object> out = toRunSummary(run);
+                    out.put("inferenceConfig", parse(run.getInferenceConfigJson()));
+                    out.put("cases", caseResultRepository.findByRunId(id).stream().map(r -> {
+                        Map<String, Object> m = toCaseSummary(r);
+                        m.put("detectedFindings", parse(r.getDetectedFindings()));
+                        m.put("expectedFindings", parse(r.getExpectedFindingsJson()));
+                        m.put("matches", parse(r.getMatchesJson()));
+                        m.put("patchResults", parse(r.getPatchResultsJson()));
+                        m.put("error", r.getErrorMessage());
+                        return m;
+                    }).toList());
+                    return ResponseEntity.ok(out);
+                })
+                .orElse(ResponseEntity.notFound().build());
+    }
+
+    private Object parse(String json) {
+        if (json == null) return null;
+        try { return objectMapper.readValue(json, Object.class); } catch (Exception e) { return json; }
     }
 
     /**
@@ -102,6 +133,24 @@ public class EvalController {
         m.put("compileSuccessRate", run.getCompileSuccessRate());
         m.put("initialTestPassRate", run.getInitialTestPassRate());
         m.put("testPassRate", run.getTestPassRate());
+        m.put("status", run.getStatus());
+        m.put("errorMessage", run.getErrorMessage());
+        m.put("aiMode", run.getAiMode());
+        m.put("datasetFingerprint", run.getDatasetFingerprint());
+        m.put("promptFingerprint", run.getPromptFingerprint());
+        m.put("truePositives", run.getTruePositives());
+        m.put("falsePositives", run.getFalsePositives());
+        m.put("falseNegatives", run.getFalseNegatives());
+        m.put("expectedCount", run.getExpectedCount());
+        m.put("detectedCount", run.getDetectedCount());
+        m.put("patchTargetCount", run.getPatchTargetCount());
+        m.put("patchAttemptedCount", run.getPatchAttemptedCount());
+        m.put("initialPatchPassCount", run.getInitialPatchPassCount());
+        m.put("finalPatchPassCount", run.getFinalPatchPassCount());
+        m.put("initialPatchPassRate", run.getInitialPatchPassRate());
+        m.put("finalPatchPassRate", run.getFinalPatchPassRate());
+        m.put("patchPassImprovementPp", run.getPatchPassImprovementPp());
+        m.put("sandboxAvailable", run.getSandboxAvailable());
         return m;
     }
 

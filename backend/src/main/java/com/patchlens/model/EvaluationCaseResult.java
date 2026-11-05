@@ -68,6 +68,23 @@ public class EvaluationCaseResult {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+
+    // ---- per-case evidence (nullable: added after the initial schema) ----
+
+    @Column(name = "expected_findings_json", columnDefinition = "TEXT")
+    private String expectedFindingsJson;
+
+    /** One-to-one matches: [{expectedId, detectedIndex}]. */
+    @Column(name = "matches_json", columnDefinition = "TEXT")
+    private String matchesJson;
+
+    /** Per patch target: initial/final patch text, statuses, repair count, failure reason. */
+    @Column(name = "patch_results_json", columnDefinition = "TEXT")
+    private String patchResultsJson;
+
+    @Column(name = "error_message", columnDefinition = "TEXT")
+    private String errorMessage;
+
     @PrePersist
     protected void onCreate() {
         createdAt = Instant.now();
@@ -116,4 +133,13 @@ public class EvaluationCaseResult {
     public long getLatencyMs()                 { return latencyMs; }
     public int getTokenUsage()                 { return tokenUsage; }
     public Instant getCreatedAt()              { return createdAt; }
+
+    public String getExpectedFindingsJson() { return expectedFindingsJson; }
+    public String getMatchesJson()          { return matchesJson; }
+    public String getPatchResultsJson()     { return patchResultsJson; }
+    public String getErrorMessage()         { return errorMessage; }
+    public void setExpectedFindingsJson(String v) { this.expectedFindingsJson = v; }
+    public void setMatchesJson(String v)          { this.matchesJson = v; }
+    public void setPatchResultsJson(String v)     { this.patchResultsJson = v; }
+    public void setErrorMessage(String v)         { this.errorMessage = v; }
 }

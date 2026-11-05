@@ -283,14 +283,44 @@ Every analysis run writes one row to `analysis_runs`:
 
 ## Evaluation Harness
 
-`POST /api/eval/run` runs the full pipeline against all built-in sample PRs and records:
+### Dataset (`backend/src/main/resources/eval/dataset-v2`)
 
-- **Precision** — fraction of detected findings that match an expected finding
-- **Recall** — fraction of expected findings that were detected
-- **Patch apply rate** — fraction of patches that applied cleanly in the sandbox
-- **Compile success rate** and **test pass rate** per eval run
+5 executable PR cases (`auth-001`, `cache-001`, `payment-001`, `pagination-001`, `resource-001`) with 8 labeled expected findings, 5 of which are patch targets. Each case has:
 
-Results are queryable via `GET /api/eval/runs`.
+| Path | Purpose |
+|---|---|
+| `case.json` | PR title/body, changed files, labeled findings (`id`, `category`, `file`, `lineStart`–`lineEnd`, `patchTarget`), reference fix |
+| `head/` | Complete Maven project at the PR head — compiles, and its own tests pass |
+| `oracle/` | Hidden tests overlaid only during patch validation — fail on the labeled bug, pass after a correct fix. Never shown to the model |
+
+The PR shown to the model contains the changed files as added files, so diff line numbers equal file line numbers. `EvalFixtureDockerIT` proves for every case, with real Docker builds, that the head passes its own tests, the oracle fails on the unfixed code, and the reference fix passes.
+
+### Metrics
+
+- **Matching** (`EvalMatcher`): a detection matches a label iff the file is identical, the category is equal, and the line ranges overlap (label widened by ±2 lines). Assignment is a deterministic one-to-one maximum matching, so duplicate detections of one issue count as one TP plus FPs.
+- **Precision** = TP / (TP + FP), **recall** = TP / (TP + FN), micro-averaged over all cases.
+- **Patch validation**: denominator = all labeled patch targets in the dataset (fixed). For each target matched by a HIGH/MEDIUM detection, the production `PatchPipelineService` generates a patch and validates it in the Docker sandbox against `head/ + oracle/`, with ≤2 repairs. Undetected targets count as failures.
+  - initial pass rate = targets whose first candidate was `VALIDATED` / targets
+  - final pass rate = targets whose final candidate was `VALIDATED` / targets
+  - improvement = (final − initial) × 100 **percentage points**
+  - if the sandbox is unavailable, patch rates are stored as `null`, never as measured values
+- Each run persists: dataset version + content fingerprint, prompt-template fingerprint, AI mode, model, inference config (temperature, max tokens, repair budget, sandbox image, match rule), per-case labels, model findings, matches, initial/final patch text, validation statuses and repair counts.
+
+### Reproducing a run
+
+```bash
+docker compose up -d postgres redis rabbitmq
+cd backend
+AI_MODE=openai OPENAI_API_KEY=... ./mvnw spring-boot:run     # on the host, so the Docker sandbox is usable
+
+curl -X POST localhost:8080/api/eval/run                      # → {"runId": "..."}
+curl localhost:8080/api/eval/runs/<runId>                     # poll until status != RUNNING
+curl localhost:8080/api/eval/runs/<runId>/export > eval-run.json
+```
+
+Compare runs only when `datasetFingerprint`, `promptFingerprint` and `inferenceConfig` match. A run with `aiMode: "mock"` exercises the harness but is not a model evaluation (the mock detector returns a placeholder finding, so recall is 0).
+
+Harness self-tests (real Docker, no model): `./mvnw test -Dtest='EvalFixtureDockerIT,EvaluationHarnessDockerIT'`.
 
 ---
 

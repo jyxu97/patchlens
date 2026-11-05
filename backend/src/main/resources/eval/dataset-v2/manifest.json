@@ -1,0 +1,11 @@
+{
+  "datasetVersion": "v2",
+  "description": "Executable PR fixtures: head/ is the PR head (its own tests pass); oracle/ holds hidden tests that fail on the labeled bug and pass after a correct fix.",
+  "cases": [
+    "auth-001",
+    "cache-001",
+    "payment-001",
+    "pagination-001",
+    "resource-001"
+  ]
+}
