@@ -95,6 +95,8 @@ public class PatchValidationService {
 
         pv.setLogs(Redactor.redactTail(logs.toString(), props.getMaxLogChars()));
         pv.setDurationMs(System.currentTimeMillis() - start);
+        com.patchlens.observability.PatchLensMetrics.validationOutcome(String.valueOf(pv.getStatus()),
+                pv.getFailureStage() == null ? null : pv.getFailureStage().name());
         pv = validationRepository.save(pv);
 
         patch.setStatus(pv.getStatus());

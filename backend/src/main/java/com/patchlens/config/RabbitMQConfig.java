@@ -12,6 +12,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
 import org.springframework.amqp.support.converter.JacksonJsonMessageConverter;
 import org.springframework.amqp.support.converter.MessageConverter;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import tools.jackson.databind.ObjectMapper;
@@ -84,29 +85,61 @@ public class RabbitMQConfig {
     }
 
     // --- Listener container factory ---
+    /**
+     * Bounded consumer concurrency (each consumer may run model calls and Docker builds) and
+     * prefetch 1, so an idle worker never holds messages another worker could process.
+     */
     @Bean
     public SimpleRabbitListenerContainerFactory rabbitListenerContainerFactory(
             ConnectionFactory connectionFactory,
             MessageConverter messageConverter,
-            MethodInterceptor retryInterceptor) {
+            MethodInterceptor retryInterceptor,
+            @Value("${patchlens.worker.concurrency:2}") int concurrency,
+            @Value("${patchlens.worker.max-concurrency:4}") int maxConcurrency) {
 
         SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
         factory.setConnectionFactory(connectionFactory);
         factory.setMessageConverter(messageConverter);
+        factory.setConcurrentConsumers(concurrency);
+        factory.setMaxConcurrentConsumers(Math.max(concurrency, maxConcurrency));
+        factory.setPrefetchCount(1);
         // CRITICAL: do NOT requeue on rejection — messages must go to DLX, not loop forever
         factory.setDefaultRequeueRejected(false);
         factory.setAdviceChain(retryInterceptor);
         return factory;
     }
 
-    // --- Retry interceptor: 3 attempts with exponential back-off (2s/4s/8s) ---
+    /** Total deliveries attempted in-process for one message (1 initial + retries). */
+    public static final int DEFAULT_MAX_ATTEMPTS = 3;
+
+    // --- Retry interceptor: exponential back-off, permanent errors are not retried ---
     @Bean
-    public MethodInterceptor retryInterceptor(MessageRecoverer messageRecoverer) {
+    public MethodInterceptor retryInterceptor(MessageRecoverer messageRecoverer,
+                                              @Value("${patchlens.worker.max-attempts:" + DEFAULT_MAX_ATTEMPTS + "}") int maxAttempts) {
         return RetryInterceptorBuilder.stateless()
-                .maxRetries(3)
-                .backOffOptions(2000, 2.0, 8000)
+                .configureRetryPolicy(policy -> policy
+                        .maxRetries(Math.max(0, maxAttempts - 1))   // Spring Framework 7: retries AFTER the first attempt
+                        .delay(java.time.Duration.ofSeconds(2))
+                        .multiplier(2.0)
+                        .maxDelay(java.time.Duration.ofSeconds(8))
+                        .predicate(RabbitMQConfig::isRetryable))
                 .recoverer(messageRecoverer)
                 .build();
+    }
+
+    /**
+     * Permanent failures (explicit reject, non-retryable GitHub errors, missing job, bad
+     * arguments) go straight to the recoverer/DLQ instead of burning retries. Listener exceptions
+     * arrive wrapped, so the whole cause chain is inspected.
+     */
+    static boolean isRetryable(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof AmqpRejectAndDontRequeueException) return false;
+            if (c instanceof com.patchlens.exception.GitHubApiException g && !g.isRetryable()) return false;
+            if (c instanceof IllegalArgumentException) return false;
+            if (c.getCause() == c) break;
+        }
+        return true;
     }
 
     // --- Message recoverer: mark job as DEAD_LETTER then reject without requeue ---
@@ -114,14 +147,23 @@ public class RabbitMQConfig {
     public MessageRecoverer messageRecoverer(ReviewJobService reviewJobService,
                                              ObjectMapper objectMapper) {
         return (message, cause) -> {
+            com.patchlens.observability.PatchLensMetrics.increment(
+                    com.patchlens.observability.PatchLensMetrics.JOB_DEAD_LETTERED,
+                    "cause", rootCause(cause).getClass().getSimpleName());
             try {
                 ReviewJobMessage msg = objectMapper.readValue(message.getBody(), ReviewJobMessage.class);
-                reviewJobService.markDeadLetter(msg.jobId(), cause.getMessage());
+                reviewJobService.markDeadLetter(msg.jobId(), rootCause(cause).getMessage());
             } catch (Exception e) {
                 // Best-effort — the message must still be rejected regardless
             }
             // Throw so Spring AMQP nacks the message → routes to DLQ
             throw new AmqpRejectAndDontRequeueException("Max retries exhausted", cause);
         };
+    }
+
+    private static Throwable rootCause(Throwable t) {
+        Throwable c = t;
+        while (c.getCause() != null && c.getCause() != c) c = c.getCause();
+        return c;
     }
 }

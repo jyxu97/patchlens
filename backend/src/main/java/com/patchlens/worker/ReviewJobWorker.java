@@ -91,6 +91,7 @@ public class ReviewJobWorker {
         } catch (JobLease.LeaseLostException e) {
             // Another delivery took over after our lease expired; it owns the results now.
             log.warn("{} — abandoning this delivery without writing results", e.getMessage());
+            com.patchlens.observability.PatchLensMetrics.increment(com.patchlens.observability.PatchLensMetrics.JOB_LEASE_LOST);
             return;
         }
         if (completed) {

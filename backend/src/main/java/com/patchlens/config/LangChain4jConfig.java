@@ -30,6 +30,17 @@ public class LangChain4jConfig {
     @Value("${openai.model:gpt-4o-mini}")
     private String chatModelName;
 
+    @Value("${openai.base-url:https://api.openai.com/v1}")
+    private String baseUrl;
+
+    /** Hard per-request timeout: a stalled model call can never block a worker indefinitely. */
+    @Value("${openai.timeout-seconds:60}")
+    private int timeoutSeconds;
+
+    /** Bounded retries for transient failures (timeouts, 429, 5xx); 4xx errors are not retried. */
+    @Value("${openai.max-retries:2}")
+    private int maxRetries;
+
     @Value("${openai.temperature:0.1}")
     private double temperature;
 
@@ -46,7 +57,12 @@ public class LangChain4jConfig {
     @Bean
     public ChatModel chatModel() {
         return OpenAiChatModel.builder()
+                .baseUrl(baseUrl)
                 .apiKey(apiKey)
+                .timeout(java.time.Duration.ofSeconds(timeoutSeconds))
+                .maxRetries(maxRetries)
+                .logRequests(false)      // prompts contain PR source code — never log them
+                .logResponses(false)
                 .modelName(chatModelName)
                 .temperature(temperature)
                 .maxTokens(maxTokens)
@@ -60,7 +76,10 @@ public class LangChain4jConfig {
     @Bean
     public EmbeddingModel embeddingModel() {
         return OpenAiEmbeddingModel.builder()
+                .baseUrl(baseUrl)
                 .apiKey(apiKey)
+                .timeout(java.time.Duration.ofSeconds(timeoutSeconds))
+                .maxRetries(maxRetries)
                 .modelName(embeddingModelName)
                 .build();
     }

@@ -305,6 +305,28 @@ Every analysis run writes one row to `analysis_runs`:
 | `testPassRate` | Fraction of patches that passed tests |
 | `repairAttemptRate` | Average repair attempts per patch |
 
+### Runtime metrics (`/actuator/prometheus`, `/actuator/metrics`)
+
+| Metric | Meaning |
+|---|---|
+| `patchlens_queue_depth{queue}` | Ready messages in `review.jobs` and `review.jobs.dlq` |
+| `patchlens_jobs_oldest_pending_age_seconds` | Age of the oldest job not yet picked up |
+| `patchlens_jobs_by_status{status}` | In-progress / failed job counts |
+| `patchlens_jobs_retries_total`, `patchlens_jobs_dead_lettered_total{cause}` | Redeliveries and DLQ events |
+| `patchlens_jobs_lease_lost_total`, `patchlens_jobs_publish_failures_total`, `patchlens_jobs_republished_total` | Ownership takeovers and outbox recovery |
+| `patchlens_model_latency_seconds{operation,outcome}`, `patchlens_model_errors_total{operation,exception}` | Model calls (review, diff understanding, patch, repair) |
+| `patchlens_sandbox_duration_seconds{step,result}` | Prefetch / compile / test container time, incl. timeouts |
+| `patchlens_validation_outcomes_total{status,stage}` | Validation results by status and failing step |
+| `patchlens_comments_delivery_total{status}`, `patchlens_comments_by_status{status}` | Comment delivery attempts and backlog |
+
+Tags never contain source code, tokens or error text. Persisted error fields and sandbox logs pass through `Redactor` (GitHub/OpenAI/AWS token shapes, bearer/password values); LangChain4j request/response logging is disabled because prompts contain PR source.
+
+### Timeouts and concurrency
+
+- Model calls: `openai.timeout-seconds` (60) per request, `openai.max-retries` (2) for transient errors only (timeouts, 429, 5xx). GitHub and OpenAI REST clients have 10 s connect / `github.timeout-seconds` (30) / 60 s read timeouts.
+- Workers: `patchlens.worker.concurrency` (2) … `max-concurrency` (4) consumers, prefetch 1; `patchlens.worker.max-attempts` (3) total in-process attempts with 2 s → 8 s backoff. Permanent errors (explicit reject, non-retryable GitHub 4xx, missing job) go to the DLQ without retries.
+- Sandbox: at most `patchlens.sandbox.max-concurrent` (2) validations run at once per instance; every step has a hard timeout.
+
 ---
 
 ## Evaluation Harness

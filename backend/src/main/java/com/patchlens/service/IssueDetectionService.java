@@ -94,7 +94,8 @@ public class IssueDetectionService {
         if (reviewed.isEmpty()) return new Detection(List.of(), plan.coverage());
 
         // Step 1 — Diff Understanding (extracts components and retrieval queries)
-        OpenAIService.DiffUnderstanding understanding = openAIService.analyzeDiff(metadata, reviewed);
+        OpenAIService.DiffUnderstanding understanding = com.patchlens.observability.PatchLensMetrics.timeModel("diff_understanding",
+                () -> openAIService.analyzeDiff(metadata, reviewed));
 
         // Step 2 — Enhanced Context Retrieval using diff-derived queries
         List<RetrievedContextChunk> retrieved = contextRetrievalService.retrieve(
@@ -106,9 +107,9 @@ public class IssueDetectionService {
         // Step 3 — Issue Detection, bounded batches
         List<OpenAIService.DetectedFinding> raw = new ArrayList<>();
         for (List<ChangedFile> batch : plan.batches()) {
-            raw.addAll(reviewAiService.isPresent()
+            raw.addAll(com.patchlens.observability.PatchLensMetrics.timeModel("review", () -> reviewAiService.isPresent()
                     ? detectWithLangChain4j(metadata, batch, contextChunks, understanding)
-                    : openAIService.detectFindings(metadata, batch, contextChunks, understanding));
+                    : openAIService.detectFindings(metadata, batch, contextChunks, understanding)));
         }
 
         // Step 4 — Deterministic filter: a finding on a file the model never saw is ungrounded

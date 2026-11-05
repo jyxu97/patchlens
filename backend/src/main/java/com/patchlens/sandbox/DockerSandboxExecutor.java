@@ -154,7 +154,9 @@ public class DockerSandboxExecutor implements SandboxExecutor {
         try {
             ProcessRunner.Result r = ProcessRunner.run(cmd, null, Duration.ofSeconds(timeoutSeconds),
                     clientEnv(), props.getMaxLogChars(), () -> killContainer(name));
-            return new StepResult(step, r.exitCode(), r.output(), r.timedOut(), r.durationMs());
+            StepResult result = new StepResult(step, r.exitCode(), r.output(), r.timedOut(), r.durationMs());
+            com.patchlens.observability.PatchLensMetrics.sandboxStep(step.startsWith("probe") ? "probe" : step, result.passed(), r.timedOut(), r.durationMs());
+            return result;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             killContainer(name);

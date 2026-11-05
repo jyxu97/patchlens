@@ -169,6 +169,7 @@ public class ReviewJobService {
         job.setLease(token, now.plus(leaseDuration));
         job.setStatus(JobStatus.PROCESSING);
         job.setAttemptCount(job.getAttemptCount() + 1);
+        if (job.getAttemptCount() > 1) com.patchlens.observability.PatchLensMetrics.increment(com.patchlens.observability.PatchLensMetrics.JOB_RETRIES);
         emitter.emit(repository.save(job));
 
         JobLease lease = new JobLease(jobId, token);

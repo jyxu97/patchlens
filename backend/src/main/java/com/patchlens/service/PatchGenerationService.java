@@ -85,7 +85,8 @@ public class PatchGenerationService {
                                                        ChangedFile targetFile,
                                                        List<String> contextChunks) {
         try {
-            OpenAIService.PatchOutput output = callGeneratePatch(finding, targetFile, contextChunks);
+            OpenAIService.PatchOutput output = com.patchlens.observability.PatchLensMetrics.timeModel("patch",
+                    () -> callGeneratePatch(finding, targetFile, contextChunks));
             String text = output.unifiedDiff() == null ? "" : output.unifiedDiff();
             PatchSuggestion patch = new PatchSuggestion(finding.getId(), text, output.rationale());
             return Optional.of(patchSuggestionRepository.save(patch));
@@ -106,7 +107,8 @@ public class PatchGenerationService {
         if (previous.getRepairAttempts() >= MAX_REPAIR_ATTEMPTS) {
             throw new IllegalStateException("Repair budget exhausted for patch " + previous.getId());
         }
-        OpenAIService.PatchOutput repaired = callRepairPatch(finding, previous, failureFeedback);
+        OpenAIService.PatchOutput repaired = com.patchlens.observability.PatchLensMetrics.timeModel("repair",
+                () -> callRepairPatch(finding, previous, failureFeedback));
         previous.setPatchText(repaired.unifiedDiff() == null ? "" : repaired.unifiedDiff());
         previous.setRationale(repaired.rationale());
         previous.setRepairAttempts(previous.getRepairAttempts() + 1);

@@ -71,7 +71,10 @@ public class ReliabilityScheduler {
         int published = 0;
         for (UUID id : ids) {
             var job = repository.findById(id);
-            if (job.isPresent() && publisher.publish(job.get())) published++;
+            if (job.isPresent() && publisher.publish(job.get())) {
+                published++;
+                com.patchlens.observability.PatchLensMetrics.increment(com.patchlens.observability.PatchLensMetrics.JOB_REPUBLISHED);
+            }
         }
         if (!ids.isEmpty()) log.info("Recovery: republished {}/{} lost or abandoned job(s)", published, ids.size());
         return published;

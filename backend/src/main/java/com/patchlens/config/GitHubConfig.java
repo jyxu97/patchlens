@@ -1,5 +1,7 @@
 package com.patchlens.config;
 
+import java.time.Duration;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -12,9 +14,13 @@ public class GitHubConfig {
     @Value("${github.token:}")
     private String githubToken;
 
+    @Value("${github.timeout-seconds:30}")
+    private int timeoutSeconds = 30;
+
     @Bean(name = "githubRestClient")
     public RestClient githubRestClient() {
         RestClient.Builder builder = RestClient.builder()
+                .requestFactory(HttpTimeouts.factory(Duration.ofSeconds(10), Duration.ofSeconds(timeoutSeconds)))
                 .baseUrl("https://api.github.com")
                 // GitHub requires this header to use the REST API v3
                 .defaultHeader("Accept", "application/vnd.github+json")

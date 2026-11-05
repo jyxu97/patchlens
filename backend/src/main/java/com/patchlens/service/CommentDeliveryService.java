@@ -51,10 +51,12 @@ public class CommentDeliveryService {
                     job.getRepositoryOwner(), job.getRepositoryName(), job.getPullRequestNumber(), job.getCommentBody());
             if (d instanceof ReviewCommentService.Delivered delivered) {
                 jobs.recordCommentOutcome(jobId, CommentStatus.DELIVERED, delivered.commentId(), null);
+                com.patchlens.observability.PatchLensMetrics.increment(com.patchlens.observability.PatchLensMetrics.COMMENT_DELIVERY, "status", "DELIVERED");
                 return Optional.of(CommentStatus.DELIVERED);
             }
             ReviewCommentService.SkippedStale stale = (ReviewCommentService.SkippedStale) d;
             jobs.recordCommentOutcome(jobId, CommentStatus.SKIPPED_STALE, null, "PR head is now " + stale.currentHead());
+            com.patchlens.observability.PatchLensMetrics.increment(com.patchlens.observability.PatchLensMetrics.COMMENT_DELIVERY, "status", "SKIPPED_STALE");
             return Optional.of(CommentStatus.SKIPPED_STALE);
         } catch (GitHubApiException e) {
             return Optional.of(recordFailure(jobId, e.getMessage(), e.isRetryable()));
@@ -67,6 +69,7 @@ public class CommentDeliveryService {
 
     private CommentStatus recordFailure(UUID jobId, String error, boolean retryable) {
         CommentStatus s = jobs.recordCommentFailure(jobId, error, retryable);
+        com.patchlens.observability.PatchLensMetrics.increment(com.patchlens.observability.PatchLensMetrics.COMMENT_DELIVERY, "status", s.name());
         log.warn("Comment delivery for job {} failed ({}): {}", jobId, s, Redactor.redact(error));
         return s;
     }

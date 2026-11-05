@@ -37,6 +37,7 @@ public class JobPublisher {
                             job.getPullRequestNumber(), job.getPullRequestUrl()));
         } catch (RuntimeException e) {
             log.warn("Publishing job {} failed — left in outbox for recovery: {}", job.getId(), e.getMessage());
+            com.patchlens.observability.PatchLensMetrics.increment(com.patchlens.observability.PatchLensMetrics.PUBLISH_FAILURES);
             return false;
         }
         try {
