@@ -9,7 +9,7 @@ Live demo: [patchlens-alpha.vercel.app](https://patchlens-alpha.vercel.app)
 ## Features
 
 - **Multi-step AI review** — three focused LLM calls: diff understanding → evidence-grounded issue detection → per-finding patch generation; each step builds on the previous rather than relying on one monolithic prompt
-- **Evidence-grounded findings** — every detected issue must cite exact file and line number from the diff; a deterministic filter rejects hallucinated file paths, out-of-range lines, low-confidence results, and duplicate overlapping ranges
+- **Evidence-grounded findings** — a deterministic filter separates *syntactic validity* (required fields), *repository grounding* (file is in the PR and not deleted; reported lines fall on new-side diff hunk lines; evidence citations outside the diff are stripped) and leaves *behavioral validation* to the sandbox. Low-confidence findings are dropped; duplicates (same file + category + overlapping lines) keep the highest-confidence one, deterministically
 - **Automated patch generation** — for HIGH and MEDIUM severity findings, generates minimal unified diff patches with format and size validation (max 200 lines, must reference a PR file)
 - **Docker sandbox validation** — applies each patch inside a `maven:3.9-eclipse-temurin-21` container and runs the project's own compile and test commands; compile/test results are recorded per patch
 - **Bounded repair loop** — if a patch fails validation, feeds the error output back to the model for up to 2 repair attempts before giving up
