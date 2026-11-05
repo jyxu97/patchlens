@@ -37,6 +37,8 @@ public class DockerSandboxExecutor implements SandboxExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(DockerSandboxExecutor.class);
     private static final Duration PROBE_TTL = Duration.ofSeconds(60);
+    /** Prefix of every sandbox container name (distinct from docker-compose service names). */
+    public static final String CONTAINER_PREFIX = "patchlens-sbx-";
 
     private final SandboxProperties props;
     private volatile Availability cachedAvailability;
@@ -123,7 +125,7 @@ public class DockerSandboxExecutor implements SandboxExecutor {
     private List<String> baseRunArgs(String step) {
         List<String> args = new ArrayList<>(List.of(
                 "run", "--rm",
-                "--name", "patchlens-" + step + "-" + UUID.randomUUID(),
+                "--name", CONTAINER_PREFIX + step + "-" + UUID.randomUUID(),
                 "--user", props.getUser(),
                 "--cpus", props.getCpus(),
                 "--memory", props.getMemory(),

@@ -203,6 +203,18 @@ Open http://localhost:5173
 
 ---
 
+## Running Tests
+
+```bash
+cd backend
+./mvnw test                                           # everything (contextLoads needs `docker compose up -d postgres redis rabbitmq`)
+./mvnw test -Dtest=DockerSandboxIntegrationTest       # real Docker sandbox: compile/test a fixture, timeouts, isolation checks
+```
+
+`DockerSandboxIntegrationTest` is skipped (reported as not executed) when no Docker daemon is reachable; it is never replaced by a mock. The first run pulls `maven:3.9.9-eclipse-temurin-21` and resolves fixture dependencies into `backend/target/sandbox-it`.
+
+---
+
 ## API Endpoints
 
 | Method | Endpoint | Description |
